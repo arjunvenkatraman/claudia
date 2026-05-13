@@ -1,0 +1,32 @@
+# Lessons learned
+
+## 2026-05-12 — Initial build
+
+- **JSONL schema**: Every Claude Code assistant turn in `~/.claude/projects/**/*.jsonl`
+  carries a `message.usage` object with full token breakdown including cache split. The
+  `type: "assistant"` field identifies these entries. Filter out `model: "<synthetic>"` —
+  those appear in internal tool-use plumbing and carry no real usage data.
+
+- **Cache tokens dominate**: For heavy Claude Code use, `cache_read_input_tokens` is
+  typically 50-100× larger than `output_tokens`. Over 3 weeks: 282M cache reads vs 3.3M
+  output tokens. Pricing matters: cache reads at $0.30/MTok vs output at $15/MTok means
+  the cache is saving very significant cost.
+
+- **Output tokens drive energy**: Despite cache reads being the largest token count,
+  energy consumption is dominated by output tokens (0.39 J each) because each output
+  token requires a full autoregressive forward pass. Cache reads are ~0.02 J each.
+
+- **Admin API requires Admin key**: The `/v1/organizations/usage_report/messages` endpoint
+  rejects regular user API keys (`sk-ant-api...`) with a 403. It requires an Admin key
+  (`sk-ant-admin...`) provisioned at console.anthropic.com → Settings → Admin API Keys.
+  Org admin role required to create these.
+
+- **API field for cache writes**: In the Admin API response, cache creation is split into
+  `cache_creation.ephemeral_1h_input_tokens` and `cache_creation.ephemeral_5m_input_tokens`.
+  The local JSONL rolls these into a single `cache_creation_input_tokens` field. Sum both
+  API fields to match the local figure.
+
+- **Anthropic has no per-token environmental data**: No official Anthropic figure exists
+  for energy per token. The best public source is TokenPowerBench (arxiv 2512.03024) at
+  0.39 J/output token on H100 hardware. Water and carbon are derived from this via
+  industry-average data-center WUE and US grid intensity.
