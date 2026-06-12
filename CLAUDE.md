@@ -9,29 +9,32 @@ to report token usage, estimated cost, and environmental impact. Intended to gro
 broader suite of Claude self-analysis and observability tools.
 
 The installed binary lives at `/usr/local/bin/claudia`. The source is the single file
-`/xpal-src/claudia/claudia`.
+`/xpal-src/claudia/claudia.py` (`.py` extension required for Python packaging).
 
 ## Repository layout
 
 ```
 claudia/
-├── claudia                  # The CLI — single Python script, stdlib only
+├── claudia.py               # The CLI — single Python script, stdlib only
+├── pyproject.toml           # Package metadata for uv tool install
 ├── CLAUDE.md                # This file
 ├── docs/decisions/          # ADRs — read before changing core approach
 │   ├── ADR-001-local-jsonl-parsing.md
 │   ├── ADR-002-environmental-estimates.md
 │   └── ADR-003-admin-api-verify.md
-└── tasks/
-    ├── todo.md              # Current and upcoming work
-    └── lessons.md           # Dated discoveries and gotchas
+├── tasks/
+│   ├── todo.md              # Current and upcoming work
+│   └── lessons.md           # Dated discoveries and gotchas
+└── tests/
+    └── test_claudia.py      # Fixture-based unit tests
 ```
 
 ## Design constraints
 
 - **stdlib only** — no third-party dependencies. `claudia` must run with the system Python
   (`/usr/bin/python3`) without a virtualenv. Every import must be from the standard library.
-- **Single file** — the entire tool is `claudia`. Do not split into modules until the file
-  genuinely becomes unmanageable (>800 lines is a reasonable threshold).
+- **Single file** — the entire tool is `claudia.py`. At ~870 lines it is approaching the
+  split threshold — consider extracting Admin API helpers if the file grows further.
 - **No auth by default** — the core reporting commands read local files only. The `--verify`
   command is the only path that touches the network, and it requires an explicit env var.
 - **Offline-first** — all estimates (cost, energy, water, carbon) are computed locally from
@@ -66,7 +69,7 @@ Environmental and pricing constants live at the top of `claudia`:
 
 After updating constants, copy to `/usr/local/bin/claudia`:
 ```bash
-cp /xpal-src/claudia/claudia /usr/local/bin/claudia
+cp /xpal-src/claudia/claudia.py /usr/local/bin/claudia
 ```
 
 ## Verifying against the Anthropic Admin API
@@ -93,5 +96,5 @@ API integration approach. Key decisions:
 ## Git workflow
 
 - Conventional commits: `feat:`, `fix:`, `docs:`, `chore:`
-- After any change to `claudia`, copy to `/usr/local/bin/claudia`
+- After any change to `claudia.py`, copy to `/usr/local/bin/claudia`
 - Do not commit API keys or Admin keys

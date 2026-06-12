@@ -15,19 +15,24 @@
 - [x] `--verify`: cross-check local totals vs Anthropic Admin API
 - [x] `--api-key-id`: filter verify to a specific API key
 - [x] Project structure: CLAUDE.md, ADRs, tasks/
+- [x] `--serve` / `--port` — local web dashboard (http.server, auto-refresh)
+- [x] `--snapshot` — save daily JSON to `~/.claude/claudia-snapshots/`
+- [x] `--install-cron` — daily cron job to run `--snapshot` at 08:00
+- [x] `--export json/csv` — machine-readable output; CSV combines with `--by`
+- [x] `--watch [--interval]` — live summary mode, reruns every N seconds
+- [x] `--delta {week,month}` — period-over-period cost and turn delta table
+- [x] `--cost` — local cost breakdown by model × token type (input/output/cw/cr)
+- [x] `--keys` — list Admin API key IDs (requires ANTHROPIC_ADMIN_KEY)
+- [x] `pyproject.toml` — installable via `uv tool install .`; source renamed to `claudia.py`
+- [x] `tests/test_claudia.py` — 23 fixture-based unit tests (pytest + unittest)
 
 ## Upcoming
 
-- [ ] `git init` and first commit
-- [ ] `pyproject.toml` — proper Python package so `claudia` can be installed via `uv tool install`
-- [ ] `--export csv` / `--export json` — machine-readable output for downstream use
-- [ ] `claudia keys` subcommand — list API key IDs from the Admin API to make `--api-key-id` discoverable
-- [ ] `claudia cost` — detailed cost breakdown using the `/v1/organizations/cost_report` endpoint
+- [x] Cross-filter composition — `--model` filter added (substring match); combines freely with `--since`, `--project` across all report commands including `--cost`, `--delta`, `--by`, `--watch`, `--serve`
+- [x] `git init` and first commit (done)
 - [ ] Multi-machine support — aggregate JSONL from remote machines via SSH or shared mount
-- [ ] `--watch` live mode — tail JSONL files and update the summary in place
-- [ ] Week-over-week / month-over-month delta view
 - [ ] Team usage rollup — aggregate by user across a shared workspace (requires Admin API)
-- [ ] Tests — at minimum, fixture-based tests against sample JSONL to guard against schema drift
+- [ ] Consider splitting `claudia.py` (now ~870 lines) into `_core.py` + `_admin.py` + entrypoint
 
 ## Known issues / watch items
 

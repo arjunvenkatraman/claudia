@@ -22,7 +22,12 @@
       "Bash(git branch *)",
       "Bash(git add *)",
       "Bash(git commit *)",
-      "Bash(git config *)"
+      "Bash(git config *)",
+      "Bash(claudia *)",
+      "Bash(curl -s http://localhost:7777/api/data)",
+      "Bash(curl *)",
+      "Bash(git mv *)",
+      "Bash(git *)"
     ]
   }
 }

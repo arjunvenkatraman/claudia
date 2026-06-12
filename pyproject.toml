@@ -1,0 +1,28 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "claudia"
+version = "0.3.0"
+description = "Claude Introspective Analysis — token usage, cost, and environmental impact for Claude Code"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+keywords = ["claude", "anthropic", "llm", "usage", "cost", "observability"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+]
+dependencies = []
+
+[project.scripts]
+claudia = "claudia:main"
+
+[tool.hatch.build.targets.wheel]
+sources = ["."]
+include = ["claudia.py"]
