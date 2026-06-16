@@ -30,24 +30,40 @@ PRICING = {
 }
 DEFAULT_PRICING = (3.00, 15.00, 3.75, 0.30)  # sonnet as fallback
 
-# Energy per token in Joules (TokenPowerBench / Luccioni et al. 2023)
-# Output (decode) is one forward pass per token; input/cache-write (prefill) is one
-# pass over all tokens; cache reads are mostly memory ops.
+# Energy per token at the GPU in Joules (IT equipment energy only; PUE applied separately)
+# Source: TokenPowerBench (arxiv 2512.03024) and Luccioni et al. 2023 (ACL) for
+# decode/prefill values; Agrawal et al. 2024 (OSDI) for prefill vs. decode cost split.
+# Reflects large-parameter (50B+) model inference on H100-class hardware. ±50% uncertainty.
 ENERGY_J = {
-    "out": 0.39,   # autoregressive decode
-    "inp": 0.13,   # prefill forward pass
-    "cw":  0.13,   # cache write ≈ prefill
-    "cr":  0.02,   # cache read (KV retrieval only)
+    "out": 0.39,   # decode: 1 full forward pass per output token (compute-bound)
+    "inp": 0.13,   # prefill: 1 forward pass amortized over full context
+    "cw":  0.13,   # cache write: same compute as prefill; KV activations stored to HBM
+    "cr":  0.02,   # cache read: KV retrieval only — memory-bandwidth-bound, no matmul
 }
 JOULES_PER_KWH    = 3_600_000
-WATER_L_PER_KWH   = 1.8    # industry-average data-center WUE (Li et al. 2023)
+
+# Power Usage Effectiveness: total facility energy ÷ IT equipment energy.
+# Google global avg 2023: 1.10 (Google ESG 2023); AWS est: ~1.15; industry avg: 1.58.
+# Using 1.12 for hyperscaler-class infrastructure (Anthropic runs on AWS/GCP).
+PUE = 1.12
+
+# Water Usage Effectiveness: liters of cooling water evaporated per IT kWh consumed.
+# This is physical water consumed (evaporated in cooling towers) — not pumping energy.
+# Source: Li et al. 2023 ("Making AI Less Thirsty", arxiv 2304.03271).
+# Provider range: 0.49 L/kWh (Microsoft) to 1.80 L/kWh (industry avg).
+# Using industry average as conservative estimate given infrastructure uncertainty.
+WUE_L_PER_KWH    = 1.8
+
 CARBON_KG_PER_KWH = 0.384  # US grid average 2024 (EPA / Ember)
 
 # Real-world energy analogs
 LED_HOUSE_KW       = 0.072  # 8 × 9W LED bulbs — 800 sq ft, 2-room house
 LED_HOURS_PER_DAY  = 5.0    # assumed daily lighting hours
-WATER_PUMP_KWH_DAY = 0.15   # municipal pumping for 300 L/day at ~0.5 kWh/m³ (US EPA)
 MEAL_KWH           = 0.5    # 30 min on a 1 kW electric burner
+
+# Real-world water volume analogs (volume comparison, not energy)
+WATER_GLASS_L   = 0.250   # standard 8 oz / 250 mL drinking glass
+WATER_SHOWER_L  = 65.0    # 8-minute shower at 8 L/min (US EPA WaterSense)
 
 
 def calc_cost(model, inp, out, cw, cr):
@@ -56,11 +72,18 @@ def calc_cost(model, inp, out, cw, cr):
 
 
 def calc_env(inp, out, cw, cr):
-    """Return (energy_kwh, water_l, carbon_kg) for given token counts."""
-    joules = (inp * ENERGY_J["inp"] + out * ENERGY_J["out"] +
-              cw  * ENERGY_J["cw"]  + cr  * ENERGY_J["cr"])
-    kwh    = joules / JOULES_PER_KWH
-    return kwh, kwh * WATER_L_PER_KWH, kwh * CARBON_KG_PER_KWH
+    """Return (kwh_it, water_l, carbon_kg) for given token counts.
+
+    kwh_it    — IT equipment energy (GPU compute only)
+    water_l   — cooling water evaporated at the data center (WUE × IT kWh)
+    carbon_kg — grid emissions from total facility draw (IT × PUE × carbon factor)
+    """
+    joules_it = (inp * ENERGY_J["inp"] + out * ENERGY_J["out"] +
+                 cw  * ENERGY_J["cw"]  + cr  * ENERGY_J["cr"])
+    kwh_it    = joules_it / JOULES_PER_KWH
+    water_l   = kwh_it * WUE_L_PER_KWH
+    carbon_kg = kwh_it * PUE * CARBON_KG_PER_KWH
+    return kwh_it, water_l, carbon_kg
 
 
 def load_entries(since=None, project_filter=None, model_filter=None):
@@ -179,10 +202,9 @@ def _fmt_duration(hours):
     return f"{hours/24:.1f} days"
 
 
-def print_energy_analogs(kwh):
+def print_env_analogs(kwh, water_l):
     lighting_h = kwh / LED_HOUSE_KW
     lighting_d = lighting_h / LED_HOURS_PER_DAY
-    water_d    = kwh / WATER_PUMP_KWH_DAY
     meals      = kwh / MEAL_KWH
 
     # Lighting line
@@ -194,12 +216,18 @@ def print_energy_analogs(kwh):
         light_qty = f"{lighting_d:.1f} days ({lighting_h:.0f} hrs)"
     light_note = f"8 × 9W LED bulbs, 800 sq ft / 2-room house, {LED_HOURS_PER_DAY:.0f}h/day use"
 
-    # Water line
-    if water_d < 1:
-        water_qty = f"{water_d*24:.1f} hours"
+    # Water line — volume of cooling water evaporated, compared to everyday volumes
+    if water_l < WATER_GLASS_L:
+        water_qty  = f"{water_l*1000:.0f} mL"
+        water_note = "of data-center cooling water evaporated (< 1 glass)"
+    elif water_l < WATER_SHOWER_L:
+        glasses    = water_l / WATER_GLASS_L
+        water_qty  = f"{glasses:.1f} glasses (250 mL each)"
+        water_note = f"of data-center cooling water evaporated; WUE {WUE_L_PER_KWH} L/kWh (Li et al. 2023)"
     else:
-        water_qty = f"{water_d:.1f} days"
-    water_note = "1-person household, 300 L/day at US EPA municipal efficiency"
+        showers    = water_l / WATER_SHOWER_L
+        water_qty  = f"{showers:.1f} × 8-min showers"
+        water_note = f"of data-center cooling water evaporated; WUE {WUE_L_PER_KWH} L/kWh (Li et al. 2023)"
 
     # Cooking line
     if meals < 1:
@@ -208,10 +236,10 @@ def print_energy_analogs(kwh):
         cook_qty = f"{meals:.1f} meals"
     cook_note = "30-min meal on a single 1 kW electric burner"
 
-    print(f"\n  Real-world energy equivalents:")
+    print(f"\n  Real-world equivalents:")
     print(f"    Lighting  {light_qty}")
     print(f"              ({light_note})")
-    print(f"    Water     {water_qty} of drinking water pumped")
+    print(f"    Water     {water_qty}")
     print(f"              ({water_note})")
     print(f"    Cooking   {cook_qty} cooked on electric stove")
     print(f"              ({cook_note})")
@@ -235,7 +263,7 @@ def print_table(buckets, label_header, show_env=False):
             totals["sessions"] |= b["sessions"]
         print(f"  {h.replace('┬','┴')}")
         print(f"  {'TOTAL':<{col_w}}  │ {totals['turns']:>5}  │ {fmt_tok(totals['inp']):>7}  │ {fmt_tok(totals['out']):>7}  │ {fmt_wh(totals['energy']):>9}  │ {fmt_water(totals['water']):>9}  │ {fmt_carbon(totals['carbon'])}")
-        print_energy_analogs(totals["energy"])
+        print_env_analogs(totals["energy"], totals["water"])
         print()
     else:
         h = f"{'─'*(col_w+2)}┬{'─'*8}┬{'─'*9}┬{'─'*9}┬{'─'*9}┬{'─'*9}┬{'─'*10}┬{'─'*9}"
@@ -285,7 +313,7 @@ def print_summary(entries, show_env=False):
     print(f"  Water:         {fmt_water(total_water)}")
     print(f"  Carbon:        {fmt_carbon(total_carbon)}")
     print(f"  ≈ driving      {_car_km(total_carbon):.1f} km in an average car")
-    print_energy_analogs(total_energy)
+    print_env_analogs(total_energy, total_water)
 
     print(f"\n  Models:")
     for m, c in sorted(models.items(), key=lambda x: -x[1]):
