@@ -12,6 +12,7 @@ import http.server
 import json
 import os
 import pathlib
+import re
 import subprocess
 import sys
 import time
@@ -656,8 +657,14 @@ def cmd_export(entries: list, fmt: str, by: str | None) -> None:
     if fmt == "json":
         print(json.dumps(build_api_data(entries), indent=2))
         return
-    key    = {"project": "project", "day": "date", "week": "week", "month": "month"}.get(by or "project", "project")
-    header = {"project": "Project", "date": "Date", "week": "Week", "month": "Month"}[key]
+    _by_map = {
+        "project":   ("project",   "Project"),
+        "day":       ("date",      "Date"),
+        "week":      ("week",      "Week"),
+        "month":     ("month",     "Month"),
+        "task-type": ("task_type", "Task Type"),
+    }
+    key, header = _by_map.get(by or "project", ("project", "Project"))
     w = csv.writer(sys.stdout)
     w.writerow([header, "turns", "inp", "out", "cw", "cr", "cost_usd", "energy_kwh", "sessions"])
     for k, b in sorted(aggregate(entries, key).items()):
@@ -735,6 +742,177 @@ def cmd_cost(entries: list) -> None:
                 print(f"    {lbl}  {fmt_tok(n):>9} tokens  × ${price:>5.2f}/M  =  ${n*price/1_000_000:>9.4f}")
     print(f"\n  {'─'*60}")
     print(f"  TOTAL  ${total:.4f}\n")
+
+
+# ── task-type classifier ──────────────────────────────────────────────────────
+
+LABELS_CACHE_FILE = pathlib.Path.home() / ".claude" / "claudia-labels.json"
+
+DEFAULT_TAXONOMY: dict[str, str] = {
+    "research":       "Literature review, investigation, analysis of a topic",
+    "policy-writing": "Policy briefs, strategy documents, memos, proposals",
+    "doc-generation": "Generating documents, reports, presentations",
+    "code":           "Writing, debugging, or refactoring code",
+    "data-analysis":  "Data wrangling, visualization, statistical analysis",
+    "creative":       "Creative writing, koans, stories, poems",
+    "other":          "Uncategorized",
+}
+
+# (cwd_pattern, msg_pattern, label) — rule fires if ANY non-None pattern matches. First wins.
+DEFAULT_RULES: list[tuple[str | None, str | None, str]] = [
+    (r"koan|creative|poem|story",   r"\bkoan\b|\bpoem\b|\bstory\b|creative.writ",                  "creative"),
+    (r"sovereign|ai.strat|policy",  r"policy.brief|strategy.doc|\bsovereign\b",                     "policy-writing"),
+    (r"sharepoint|grant|closeout",  r"sharepoint|grant\s+write|closeout",                            "doc-generation"),
+    (r"claudia|/src/|/lib/|/test",  r"\brefactor\b|\bdebug\b|implement.*feature",                  "code"),
+    (None, r"\banalys[ei]|\bdata\b.*(csv|excel|sheet|pivot)|visuali[sz]|\bdashboard\b",             "data-analysis"),
+    (None, r"\bresearch\b|literature.review|investigat",                                              "research"),
+    (None, r"(?:draft|generate|prepare|write)\s+(?:a\s+)?(?:doc|report|brief|slide|presentat)",     "doc-generation"),
+    (r"\.(?:py|js|ts|go|rs|java|cpp|c|sh)\b",                                 None,                 "code"),
+]
+
+
+def load_taxonomy() -> dict[str, str]:
+    """Load user taxonomy from ~/.claude/claudia-taxonomy.json or return defaults."""
+    f = pathlib.Path.home() / ".claude" / "claudia-taxonomy.json"
+    if f.exists():
+        try:
+            data = json.loads(f.read_text())
+            if isinstance(data, dict):
+                return data
+        except (json.JSONDecodeError, OSError):
+            pass
+    return DEFAULT_TAXONOMY
+
+
+def load_labels_cache() -> dict[str, str]:
+    if LABELS_CACHE_FILE.exists():
+        try:
+            data = json.loads(LABELS_CACHE_FILE.read_text())
+            if isinstance(data, dict):
+                return data
+        except (json.JSONDecodeError, OSError):
+            pass
+    return {}
+
+
+def save_labels_cache(cache: dict[str, str]) -> None:
+    try:
+        LABELS_CACHE_FILE.write_text(json.dumps(cache, indent=2))
+    except OSError:
+        pass
+
+
+def load_first_messages() -> dict[str, tuple[str, str]]:
+    """Scan all JSONL files; return {sessionId: (cwd, first_user_text)}."""
+    sessions: dict[str, tuple[str, str]] = {}
+    pattern = str(pathlib.Path.home() / ".claude/projects/**/*.jsonl")
+    for f in glob.glob(pattern, recursive=True):
+        with open(f, errors="replace") as fh:
+            for line in fh:
+                try:
+                    e = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if e.get("type") != "user":
+                    continue
+                sid = e.get("sessionId", "")
+                if not sid or sid in sessions:
+                    continue
+                cwd     = e.get("cwd", "")
+                content = (e.get("message") or {}).get("content", "")
+                if isinstance(content, list):
+                    text = " ".join(
+                        b.get("text", "") for b in content
+                        if isinstance(b, dict) and b.get("type") == "text"
+                    ).strip()
+                else:
+                    text = str(content).strip()
+                if text:
+                    sessions[sid] = (cwd, text)
+    return sessions
+
+
+def _rules_label(cwd: str, text: str) -> str:
+    for cwd_pat, msg_pat, label in DEFAULT_RULES:
+        if cwd_pat and re.search(cwd_pat, cwd, re.IGNORECASE):
+            return label
+        if msg_pat and re.search(msg_pat, text, re.IGNORECASE):
+            return label
+    return "other"
+
+
+def _haiku_classify_one(api_key: str, cwd: str, text: str, labels: list[str]) -> str:
+    taxonomy_list = ", ".join(labels)
+    payload = json.dumps({
+        "model":      "claude-haiku-4-5",
+        "max_tokens": 20,
+        "system": (
+            f"Classify work sessions. Given a directory path and the user's first message, "
+            f"output exactly one label from: {taxonomy_list}. "
+            "Output the label only — no punctuation, no explanation."
+        ),
+        "messages": [{"role": "user", "content": f"cwd: {cwd}\nmessage: {text[:600]}"}],
+    }).encode()
+    req = urllib.request.Request(
+        "https://api.anthropic.com/v1/messages",
+        data=payload,
+        headers={
+            "x-api-key":         api_key,
+            "anthropic-version": "2023-06-01",
+            "content-type":      "application/json",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            resp = json.loads(r.read())
+        label = resp["content"][0]["text"].strip().lower().rstrip(".")
+        return label if label in labels else "other"
+    except Exception:
+        return "other"
+
+
+def annotate_task_types(
+    entries: list[dict],
+    classifier: str,
+    yes: bool = False,
+) -> list[dict]:
+    """Add 'task_type' field to each entry; classify uncached sessions and update cache."""
+    cache      = load_labels_cache()
+    first_msgs = load_first_messages()
+    taxonomy   = load_taxonomy()
+    labels     = list(taxonomy.keys())
+
+    all_sessions = {e["session"] for e in entries if e["session"]}
+    classifiable = [s for s in all_sessions if s not in cache and s in first_msgs]
+
+    if classifiable:
+        if classifier == "haiku":
+            api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+            if not api_key:
+                print("\n  ANTHROPIC_API_KEY not set — required for --classifier haiku.", file=sys.stderr)
+                sys.exit(1)
+            est = len(classifiable) * 0.0001
+            if len(classifiable) > 50 and sys.stdout.isatty() and not yes:
+                print(f"\n  Classifying {len(classifiable)} new sessions via claude-haiku-4-5 (~${est:.2f}).")
+                if input("  Proceed? [y/N] ").strip().lower() not in ("y", "yes"):
+                    print("  Aborted.")
+                    sys.exit(0)
+            else:
+                print(f"  Classifying {len(classifiable)} session(s) via haiku (~${est:.4f}) …", file=sys.stderr)
+            for i, sid in enumerate(classifiable, 1):
+                cwd, text  = first_msgs[sid]
+                cache[sid] = _haiku_classify_one(api_key, cwd, text, labels)
+                print(f"\r  {i}/{len(classifiable)}", end="", flush=True, file=sys.stderr)
+            print(file=sys.stderr)
+        else:
+            for sid in classifiable:
+                cwd, text  = first_msgs[sid]
+                cache[sid] = _rules_label(cwd, text)
+        save_labels_cache(cache)
+
+    for e in entries:
+        e["task_type"] = cache.get(e["session"], "other")
+    return entries
 
 
 # ── admin API key list ─────────────────────────────────────────────────────────
@@ -819,8 +997,14 @@ def main():
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("--by", choices=["project", "day", "week", "month"],
-                        help="Group results by project, day, week, or month")
+    parser.add_argument("--by", choices=["project", "day", "week", "month", "task-type"],
+                        help="Group results by project, day, week, month, or task-type")
+    parser.add_argument("--classifier", choices=["rules", "haiku"], default="rules",
+                        metavar="{rules,haiku}",
+                        help="Classifier backend for --by task-type: "
+                             "'rules' (offline regex, default) or 'haiku' (claude-haiku-4-5, requires ANTHROPIC_API_KEY)")
+    parser.add_argument("--yes", action="store_true",
+                        help="Skip confirmation prompts (e.g. haiku batch cost confirmation)")
     parser.add_argument("--since", metavar="YYYY-MM-DD",
                         help="Only include usage on or after this date")
     parser.add_argument("--project", metavar="PATH",
@@ -883,6 +1067,9 @@ def main():
         print("No matching usage data found.")
         sys.exit(0)
 
+    if args.by == "task-type":
+        entries = annotate_task_types(entries, args.classifier, yes=args.yes)
+
     if args.export:
         cmd_export(entries, args.export, args.by)
     elif args.snapshot:
@@ -894,8 +1081,8 @@ def main():
     elif args.verify:
         cmd_verify(entries, api_key_ids=args.api_key_ids)
     elif args.by:
-        key   = {"project": "project", "day": "date", "week": "week", "month": "month"}[args.by]
-        label = {"project": "Project",  "day": "Date", "week": "Week", "month": "Month"}[args.by]
+        key   = {"project": "project", "day": "date", "week": "week", "month": "month", "task-type": "task_type"}[args.by]
+        label = {"project": "Project",  "day": "Date", "week": "Week", "month": "Month", "task-type": "Task Type"}[args.by]
         print_table(aggregate(entries, key), label, show_env=args.env)
     elif args.models:
         print_table(aggregate(entries, "model"), "Model", show_env=args.env)
