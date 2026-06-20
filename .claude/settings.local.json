@@ -27,7 +27,10 @@
       "Bash(curl -s http://localhost:7777/api/data)",
       "Bash(curl *)",
       "Bash(git mv *)",
-      "Bash(git *)"
+      "Bash(git *)",
+      "Bash(gh issue *)",
+      "Bash(python *)",
+      "Bash(gh pr *)"
     ]
   }
 }
