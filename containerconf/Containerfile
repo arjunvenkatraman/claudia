@@ -1,0 +1,76 @@
+# Base image — Debian 12 "bookworm", slim variant (no docs/extras)
+FROM docker.io/library/debian:bookworm-slim
+
+# Install Node.js 20 LTS, the tools Claude Code wants, and zsh
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        curl ca-certificates git ripgrep zsh \
+    && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
+    && npm install -g @anthropic-ai/claude-code \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create a non-root user with zsh as the login shell.
+#
+# HOST_UID defaults to 501 — the typical first-user UID on macOS, which is what
+# Podman passes through to bind mounts on this host. `coder` MUST match the UID
+# the mounts appear as inside the container (verified with `ls -ldn /xpal-auth`
+# = 501 here), or it can't write to them. The bind-mounted dirs grant write to
+# their owner, so matching the UID is what matters. If your host UID differs
+# (check with `id -u`), override at build time:
+#   podman build --build-arg HOST_UID=$(id -u) -t xpal-claudia .
+ARG HOST_UID=501
+RUN useradd -m -s /usr/bin/zsh -u "${HOST_UID}" coder
+
+# --- Mount points ---------------------------------------------------------
+# Host volumes mount here at runtime:
+#   Development/xpal-src  -> /xpal-src   (code)
+#   Development/xpal-data -> /xpal-data  (data)
+#   Development/xpal-auth -> /xpal-auth  (all credentials — see below)
+RUN mkdir -p /xpal-src /xpal-data /xpal-auth \
+    && chown coder:coder /xpal-src /xpal-data /xpal-auth
+
+# --- Authentication redirection ------------------------------------------
+# Point every credential-writing tool at /xpal-auth so nothing sensitive
+# lands in the container's ephemeral layer. All of these persist on the host.
+ENV CLAUDE_CONFIG_DIR=/xpal-auth/claude
+ENV GIT_CONFIG_GLOBAL=/xpal-auth/git/gitconfig
+ENV NPM_CONFIG_USERCONFIG=/xpal-auth/npm/npmrc
+
+# Set HOME explicitly. A RUN after `USER coder` does NOT inherit /home/coder as
+# HOME automatically, so oh-my-zsh, uv, etc. would otherwise install to /.
+ENV HOME=/home/coder
+
+# uv installs its binaries to ~/.local/bin and uv-managed tools (like ipython)
+# to ~/.local/bin as well; put both on PATH for all shells.
+ENV PATH=/home/coder/.local/bin:$PATH
+
+# Entrypoint handles runtime auth-dir setup (must happen after the mount exists).
+# --chmod=755 sets the executable bit at copy time, so it works even if the
+# source file arrived without +x (e.g. downloaded through a browser).
+COPY --chmod=755 entrypoint.sh /usr/local/bin/entrypoint.sh
+
+USER coder
+WORKDIR /xpal-src
+
+# Install oh-my-zsh unattended: --unattended skips the chsh prompt and does not
+# try to launch zsh at the end (both would break a non-interactive build).
+RUN sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)" "" --unattended
+
+# --- Python toolchain (uv-owned) -----------------------------------------
+# Install uv via the standalone installer (no pre-existing Python needed, and
+# it sidesteps Debian's externally-managed-environment restriction). uv then
+# owns Python entirely — there is intentionally no apt python3.
+RUN curl -fsSL https://astral.sh/uv/install.sh | sh
+
+# Install a managed CPython, and expose bare `python`/`python3` on PATH so the
+# interpreter is usable directly, not only via `uv run`.
+RUN uv python install --default
+
+# Install IPython as a uv-managed tool (isolated, on PATH as `ipython`).
+RUN uv tool install ipython
+
+# Init auth dirs (via entrypoint), then drop into zsh
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+CMD ["zsh"]

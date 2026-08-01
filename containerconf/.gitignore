@@ -1,0 +1,19 @@
+# Secrets — never commit credentials or env files
+.env
+.env.*
+*.key
+*.pem
+credentials.json
+
+# Claude Code local config / auth (if you ever mount it into the repo dir)
+.claude/
+.config/
+
+# OS / editor cruft
+.DS_Store
+*.swp
+.idea/
+.vscode/
+
+# Dependency-tracking scratch log (should live in xpal-data, not the repo)
+containerfile-additions.log
