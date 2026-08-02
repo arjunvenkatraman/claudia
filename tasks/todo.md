@@ -41,6 +41,28 @@
 - [ ] Team usage rollup — aggregate by user across a shared workspace (requires Admin API)
 - [ ] Consider splitting `claudia.py` (now ~870 lines) into `_core.py` + `_admin.py` + entrypoint
 
+## Rollout plan — personal tracking before sharing (user decision 2026-08-02)
+
+Share-back (`claudia submit` → public dataset → BTT observed reads public data) is
+**parked** until personal reporting is tested on both agents. Tracked in GitHub:
+milestone "Rollout - personal tracking (Phases A+B)" = #14 #15 #16; milestone
+"Rollout - share-back (Phase C)" = #17 #18. Sequence:
+
+- [ ] **Phase A — claude machine bring-up** (other machine, Claude Code + container) — [#14](https://github.com/arjunvenkatraman/claudia/issues/14):
+      run `containerconf/setup.sh`; apply the project structure there (CLAUDE.md, `docs/`,
+      `tasks/`, `docs/decisions/`, `tests/`, agent-tagging hook via
+      `claudia --install-git-hook`); install claudia (`uv tool install .`) and copy
+      `claudia.py` → `/usr/local/bin/claudia`
+- [ ] **Phase B — one week of personal tracking** — [#15](https://github.com/arjunvenkatraman/claudia/issues/15):
+      run `claudia index` (+ `--snapshot` cron) daily on both machines; confirm opencode
+      *and* claude rows land with real token counts; resolve the OpenCode session-integrity
+      watch item ([#16](https://github.com/arjunvenkatraman/claudia/issues/16)) during this window
+- [ ] **Phase C — share-back design (parked)** — [#17](https://github.com/arjunvenkatraman/claudia/issues/17) (`claudia submit`)
+      + [#18](https://github.com/arjunvenkatraman/claudia/issues/18) (`claudia export-throughput`);
+      BTT observed-layer handoff on bigtokentask [#73](https://github.com/arjunvenkatraman/bigtokentask/issues/73).
+      Only after A+B pass: ADR for opt-in, sanitized submission (PR to public dataset); switch
+      BTT's observed layer from local ledger to the public dataset
+
 ## Known issues / watch items
 
 - JSONL schema is undocumented — `version` field on each entry can detect Claude Code upgrades

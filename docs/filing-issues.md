@@ -80,6 +80,31 @@ Traceback ... (paste error, or describe)
 
 Open it with a clear title; tag with `question` if the label exists.
 
+## How work is tracked here
+
+Three layers, each with a distinct job:
+
+1. **GitHub issues** — one issue per *discrete, closable* piece of work (a bug,
+   a feature, a single phase step). Issues can be assigned, closed, referenced
+   from commits, and grouped.
+2. **Milestones** — group issues into a *time-boxed or phased* effort (e.g.
+   "Rollout — personal tracking (Phases A+B)"). Milestones carry a due date and
+   progress; an issue belongs to at most one milestone.
+3. **tasks/todo.md** — the local canonical *log* of shipped/upcoming/known
+   work, carrying ADR + issue links. The tracker is GitHub; the record is
+   todo.md.
+
+When to use which:
+
+- **Discrete deliverable** → file an issue.
+- **Part of a phase** → file the issue *and* attach it to the matching
+  milestone.
+- **Time-boxed activity** (like a tracking week) → milestone + per-step
+  issues, not one big issue.
+- **Cross-repo or multi-machine phase** → a GitHub Project board pulling
+  issues from all involved repos is the best single view; per-repo milestones
+  plus one issue per step also works without one.
+
 ## After filing
 
 - Issues from this repo are typically triaged into
@@ -97,8 +122,9 @@ This repo follows a lightweight process — useful when you submit a PR:
    Architecture Decision Record in `docs/decisions/ADR-XXX-<slug>.md` (see the
    existing ones for the format).
 2. **Issue** — open the GitHub issue referencing the ADR (or the ADR references
-   the issue).
-3. **Todo entry** — add the task to `tasks/todo.md`.
+   the issue); attach it to the matching milestone when it is part of a phase
+   (see "How work is tracked here").
+3. **Todo entry** — add the task to `tasks/todo.md` with a link to the issue.
 4. **Branch + PR** — implement on a feature branch (`feat/...`, `fix/...`,
    `docs/...`), with conventional-commit messages (`feat:`, `fix:`, `docs:`,
    `chore:`). Every commit should carry a `Coding-Agent:` trailer (see

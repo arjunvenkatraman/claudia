@@ -60,6 +60,13 @@ claudia/
 4. Write an ADR in `docs/decisions/` if the approach involves a non-obvious design choice
 5. Add the task to `tasks/todo.md` as `[x]` when shipped
 
+## Work tracking
+
+One issue per discrete piece of work; milestones group time-boxed or phased
+efforts; `tasks/todo.md` is the local record (ADR + issue links). For
+cross-repo or multi-machine phases, use a GitHub Project board. Full guidance:
+`docs/filing-issues.md` → "How work is tracked here".
+
 ## Coding standards
 
 - Python 3.10+. Use `match` where it reads better than `if/elif` chains.
