@@ -263,5 +263,48 @@ class TestLoadEntriesModelFilter(unittest.TestCase):
             self.assertEqual(len(entries), 1)
 
 
+class TestGitHook(unittest.TestCase):
+    """The Coding-Agent prepare-commit-msg hook: embedded copy stays in sync
+    with the canonical file in the project-scaffold skill."""
+
+    CANONICAL = pathlib.Path(__file__).parent.parent / "skills" / "project-scaffold" / "prepare-commit-msg.sh"
+
+    def test_embedded_hook_present(self):
+        hook = _mod.GIT_HOOK_PREPARE_COMMIT_MSG
+        self.assertIn("Coding-Agent", hook)
+        self.assertIn("CLAUDE_CODE_ENTRYPOINT", hook)
+        self.assertIn("OPENCODE", hook)
+        self.assertIn("manual", hook)
+
+    def test_embedded_hook_matches_canonical_file(self):
+        canonical = self.CANONICAL.read_text(encoding="utf-8")
+        self.assertEqual(
+            _mod.GIT_HOOK_PREPARE_COMMIT_MSG,
+            canonical,
+            "claudia.py GIT_HOOK_PREPARE_COMMIT_MSG drifted from "
+            "skills/project-scaffold/prepare-commit-msg.sh",
+        )
+
+    def test_install_git_hook_writes_executable(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = pathlib.Path(tmpdir) / "repo"
+            _mod.cmd_install_git_hook(str(repo))
+            hook = repo / ".git" / "hooks" / "prepare-commit-msg"
+            self.assertTrue(hook.exists())
+            self.assertTrue(hook.stat().st_mode & 0o111, "hook must be executable")
+            self.assertEqual(hook.read_text(encoding="utf-8"),
+                             self.CANONICAL.read_text(encoding="utf-8"))
+
+    def test_install_git_hook_idempotent(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = pathlib.Path(tmpdir) / "repo"
+            _mod.cmd_install_git_hook(str(repo))
+            hook = repo / ".git" / "hooks" / "prepare-commit-msg"
+            first_mtime = hook.stat().st_mtime_ns
+            _mod.cmd_install_git_hook(str(repo))
+            self.assertEqual(hook.stat().st_mtime_ns, first_mtime,
+                             "re-install must not overwrite an existing hook")
+
+
 if __name__ == "__main__":
     unittest.main()

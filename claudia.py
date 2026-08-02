@@ -104,6 +104,86 @@ def monitor_log() -> str:
     return os.environ.get("CLAUDIA_MONITOR_LOG", str(claude_dir() / "claudia-monitor.log"))
 
 
+# prepare-commit-msg hook: appends a `Coding-Agent:` trailer naming the coding
+# agent that produced a commit (claude | opencode | manual), detected from the
+# env markers those agents set in shells they spawn.
+# KEEP IN SYNC with skills/project-scaffold/prepare-commit-msg.sh.
+GIT_HOOK_PREPARE_COMMIT_MSG = """#!/usr/bin/env bash
+# prepare-commit-msg — append a `Coding-Agent:` trailer naming the coding agent
+# that produced this commit. Detection is via the env markers that Claude Code
+# and OpenCode set in every shell they spawn:
+#
+#   Claude Code — CLAUDECODE=1, CLAUDE_CODE_ENTRYPOINT=cli
+#   OpenCode    — OPENCODE=1, OPENCODE_PID=<pid>
+#
+# When no marker is present the commit is labeled `manual` (a human/terminal
+# commit) — an agent never silently claims a manual commit.
+#
+# Idempotent: if the message already carries a Coding-Agent trailer it is left
+# untouched, so `--amend`, merge, and squash commits are safe.
+#
+# Install via the project-scaffold skill (`scaffold.py init` or
+# `scaffold.py <dir> --install-git-hook`) or `claudia --install-git-hook`.
+
+set -u
+MSG_FILE="${1:-}"
+
+if [ -z "$MSG_FILE" ] || [ ! -f "$MSG_FILE" ]; then
+  exit 0
+fi
+
+# Already tagged — do nothing.
+if grep -qiE '^Coding-Agent:' "$MSG_FILE"; then
+  exit 0
+fi
+
+AGENT="manual"
+if [ "${CLAUDE_CODE_ENTRYPOINT:-}" != "" ] || [ "${CLAUDECODE:-}" = "1" ]; then
+  AGENT="claude"
+elif [ "${OPENCODE:-}" = "1" ]; then
+  AGENT="opencode"
+fi
+
+# Rebuild the message with the trailer appended after a blank line (git-trailer
+# style), stripping stray trailing blank lines/whitespace first.
+body="$(cat "$MSG_FILE")"
+body="$(printf '%s' "$body" | sed -e 's/[[:space:]]*$//')"
+
+if [ -n "$body" ]; then
+  printf '%s\\n\\nCoding-Agent: %s\\n' "$body" "$AGENT" > "$MSG_FILE"
+else
+  printf 'Coding-Agent: %s\\n' "$AGENT" > "$MSG_FILE"
+fi
+
+exit 0
+"""
+
+
+def cmd_install_git_hook(path: str | None) -> None:
+    """Install the Coding-Agent prepare-commit-msg hook into a git repo."""
+    root = pathlib.Path(path or os.getcwd()).expanduser()
+    hooks_dir = root / ".git" / "hooks"
+    try:
+        r = subprocess.run(["git", "-C", str(root), "config", "--get", "core.hooksPath"],
+                           capture_output=True, text=True)
+        p = r.stdout.strip()
+        if p:
+            hp = pathlib.Path(p)
+            hooks_dir = hp if hp.is_absolute() else root / hp
+    except OSError:
+        pass
+    hooks_dir.mkdir(parents=True, exist_ok=True)
+    dest = hooks_dir / "prepare-commit-msg"
+    if dest.exists():
+        print(f"  Hook already present, skipped: {dest}")
+        return
+    dest.write_text(GIT_HOOK_PREPARE_COMMIT_MSG, encoding="utf-8")
+    dest.chmod(dest.stat().st_mode | 0o755)
+    print(f"  Installed prepare-commit-msg hook: {dest}")
+    print("  Every commit will now carry a 'Coding-Agent:' trailer")
+    print("  (claude | opencode | manual).")
+
+
 def calc_cost(model, inp, out, cw, cr):
     p = PRICING.get(model, DEFAULT_PRICING)
     return (inp * p[0] + out * p[1] + cw * p[2] + cr * p[3]) / 1_000_000
@@ -1066,6 +1146,10 @@ def main():
                         help="Save a JSON snapshot to ~/.claude/claudia-snapshots/YYYY-MM-DD.json")
     parser.add_argument("--install-cron", action="store_true",
                         help="Install a daily cron job (08:00) to run --snapshot")
+    parser.add_argument("--install-git-hook", metavar="PATH", nargs="?",
+                        const=os.getcwd(), default=None,
+                        help="Install the Coding-Agent prepare-commit-msg hook into a "
+                             "git repo (default: current directory)")
     parser.add_argument("--export", choices=["json", "csv"], metavar="{json,csv}",
                         help="Export data as JSON or CSV (combines with --by for CSV grouping)")
     parser.add_argument("--watch", action="store_true",
@@ -1084,6 +1168,10 @@ def main():
 
     if args.install_cron:
         cmd_install_cron()
+        return
+
+    if args.install_git_hook:
+        cmd_install_git_hook(args.install_git_hook)
         return
 
     if args.keys:

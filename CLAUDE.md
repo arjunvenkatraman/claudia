@@ -96,5 +96,8 @@ API integration approach. Key decisions:
 ## Git workflow
 
 - Conventional commits: `feat:`, `fix:`, `docs:`, `chore:`
+- Every commit carries a `Coding-Agent:` trailer (`claude`, `opencode`, or
+  `manual`) via the `prepare-commit-msg` hook. Install it in a repo with
+  `claudia --install-git-hook [PATH]`.
 - After any change to `claudia.py`, copy to `/usr/local/bin/claudia`
 - Do not commit API keys or Admin keys
