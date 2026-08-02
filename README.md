@@ -9,11 +9,12 @@ produced it.
 uv tool install .            # or: cp claudia.py /usr/local/bin/claudia
 claudia                      # per-project summary of turns, tokens, cost
 claudia --by week --env      # weekly view with estimated energy/water/carbon
+claudia index                # agent-agnostic session token ledger (Claude + OpenCode)
 ```
 
-- **Offline-first** — reads `~/.claude/projects/**/*.jsonl`; no telemetry.
-  Only `--verify` and the `haiku` classifier touch the network, and only with
-  an explicit API key.
+- **Offline-first** — reads `~/.claude/projects/**/*.jsonl` (and OpenCode's
+  SQLite database for `claudia index`); no telemetry. Only `--verify` and the
+  `haiku` classifier touch the network, and only with an explicit API key.
 - **Stdlib-only, single file** — runs on `/usr/bin/python3`, no dependencies.
 
 ## Documentation

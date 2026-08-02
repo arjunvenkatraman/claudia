@@ -8,13 +8,17 @@ estimated cost, and environmental impact across all local sessions.
 import argparse
 import csv
 import glob
+import hashlib
 import http.server
 import json
 import os
 import pathlib
 import re
+import shutil
+import sqlite3
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.parse
@@ -56,6 +60,17 @@ PUE = 1.12
 WUE_L_PER_KWH    = 1.8
 
 CARBON_KG_PER_KWH = 0.384  # US grid average 2024 (EPA / Ember)
+
+# ── coder session index (ADR-006) ─────────────────────────────────────────────
+# Agent-agnostic per-session token ledger. Counting is purely local — no model
+# calls anywhere in the path. CHARS_PER_TOKEN is an estimate constant (~English
+# BPE average): the "index currency", not an audit figure. Where the source
+# reports provider token counts we store those too, so consumers can calibrate
+# real tokens/char per model over time.
+CHARS_PER_TOKEN = 4.0      # estimated chars → tokens conversion (÷ 4.0)
+INDEX_SCHEMA    = "xpal-coder-index/v1"
+INDEX_FILENAME  = "coder-index.jsonl"
+CLAUDIA_VERSION = "0.4.0"
 
 # Real-world energy analogs
 LED_HOUSE_KW       = 0.072  # 8 × 9W LED bulbs — 800 sq ft, 2-room house
@@ -102,6 +117,30 @@ def claudia_bin() -> str:
 
 def monitor_log() -> str:
     return os.environ.get("CLAUDIA_MONITOR_LOG", str(claude_dir() / "claudia-monitor.log"))
+
+
+def index_dir() -> pathlib.Path:
+    return _path_from_env("CLAUDIA_INDEX_DIR", claude_dir() / "claudia-index")
+
+
+def index_file() -> pathlib.Path:
+    return index_dir() / INDEX_FILENAME
+
+
+def opencode_db() -> pathlib.Path:
+    return _path_from_env("CLAUDIA_OPENCODE_DB",
+                          pathlib.Path.home() / ".local/share/opencode/opencode.db")
+
+
+def opencode_bin() -> str | None:
+    """Path to the opencode CLI used for opencode reporting, or None.
+
+    claudia gathers opencode stats via opencode's own reporting tools
+    (`opencode db` + `opencode export`); this is the authoritative baseline that
+    claude usage is tracked against (ADR-006). Falls back to a direct read of
+    opencode.db when no opencode binary is available.
+    """
+    return os.environ.get("CLAUDIA_OPENCODE_BIN") or shutil.which("opencode")
 
 
 # prepare-commit-msg hook: appends a `Coding-Agent:` trailer naming the coding
@@ -204,8 +243,101 @@ def calc_env(inp, out, cw, cr):
     return kwh_it, water_l, carbon_kg
 
 
-def load_entries(since=None, project_filter=None, model_filter=None):
+def _content_chars(content):
+    """Return (text, thinking, tool, junk) char counts from a Claude message content.
+
+    junk is only ever nonzero when the caller flags an aborted generation; this
+    helper itself never detects interruption.
+    """
+    text = thinking = tool = junk = 0
+    if isinstance(content, str):
+        text = len(content)
+    elif isinstance(content, list):
+        for b in content:
+            if not isinstance(b, dict):
+                continue
+            t = b.get("type")
+            if t == "text":
+                text += len(b.get("text", "") or "")
+            elif t in ("thinking", "redacted_thinking"):
+                thinking += len(b.get("thinking", "") or b.get("text", "") or "")
+            elif t == "tool_use":
+                tool += len(json.dumps(b, sort_keys=True, separators=(",", ":"), ensure_ascii=False))
+    return text, thinking, tool, junk
+
+
+def _user_content_chars(content) -> int:
+    """Count input-ish chars of a user message (text + tool_result bodies)."""
+    if isinstance(content, str):
+        return len(content)
+    n = 0
+    if isinstance(content, list):
+        for b in content:
+            if not isinstance(b, dict):
+                continue
+            if b.get("type") == "text":
+                n += len(b.get("text", "") or "")
+            elif b.get("type") == "tool_result":
+                rc = b.get("content", "")
+                if isinstance(rc, str):
+                    n += len(rc)
+                elif isinstance(rc, list):
+                    for x in rc:
+                        if isinstance(x, dict):
+                            n += len(x.get("text", "") or "")
+    return n
+
+
+def _chars_to_tokens(chars: int) -> int:
+    return int(chars / CHARS_PER_TOKEN)
+
+
+def _user_chars_by_session() -> dict[str, int]:
+    """Map sessionId → total user-message char count across all JSONL files."""
+    totals: dict[str, int] = {}
+    pattern = str(claude_dir() / "projects/**/*.jsonl")
+    for f in glob.glob(pattern, recursive=True):
+        with open(f, errors="replace") as fh:
+            for line in fh:
+                try:
+                    e = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if e.get("type") != "user":
+                    continue
+                sid = e.get("sessionId", "")
+                if not sid:
+                    continue
+                totals[sid] = totals.get(sid, 0) + _user_content_chars((e.get("message") or {}).get("content"))
+    return totals
+
+
+def _estimate_entry_from_content(e: dict, user_chars: dict[str, int]) -> dict | None:
+    """Fallback entry (ADR-006): estimate tokens from message content when the
+    provider omitted a usage block. Input is a user-text proxy; output is the
+    assistant content (text + thinking + tool_use)."""
+    msg = e.get("message", {})
+    text, thinking, tool, _ = _content_chars(msg.get("content"))
+    chars_out = text + thinking + tool
+    if not chars_out:
+        return None
+    ts   = e.get("timestamp", "")
+    cwd  = e.get("cwd", "unknown")
+    sid  = e.get("sessionId", "")
+    model = msg.get("model", "unknown")
+    return {
+        "ts": ts, "date": ts[:10], "week": _week(ts), "month": ts[:7],
+        "project": cwd, "session": sid, "model": model,
+        "inp": _chars_to_tokens(user_chars.get(sid, 0)),
+        "out": _chars_to_tokens(chars_out),
+        "cw": 0, "cr": 0,
+        "basis": "estimated",
+    }
+
+
+def load_entries(since=None, project_filter=None, model_filter=None, fallback=True):
     entries = []
+    user_chars = _user_chars_by_session() if fallback else {}
     pattern = str(claude_dir() / "projects/**/*.jsonl")
     for f in glob.glob(pattern, recursive=True):
         with open(f, errors="replace") as fh:
@@ -217,7 +349,7 @@ def load_entries(since=None, project_filter=None, model_filter=None):
                 if e.get("type") != "assistant":
                     continue
                 msg = e.get("message", {})
-                if "usage" not in msg or msg.get("model") in (None, "<synthetic>"):
+                if msg.get("model") in (None, "<synthetic>"):
                     continue
                 ts = e.get("timestamp", "")
                 if since and ts < since:
@@ -228,7 +360,14 @@ def load_entries(since=None, project_filter=None, model_filter=None):
                 model = msg.get("model", "unknown")
                 if model_filter and model_filter not in model:
                     continue
-                u = msg["usage"]
+                u = msg.get("usage")
+                if u is None:
+                    if not fallback:
+                        continue
+                    est = _estimate_entry_from_content(e, user_chars)
+                    if est:
+                        entries.append(est)
+                    continue
                 entries.append({
                     "ts":      ts,
                     "date":    ts[:10],
@@ -241,6 +380,7 @@ def load_entries(since=None, project_filter=None, model_filter=None):
                     "out":     u.get("output_tokens", 0),
                     "cw":      u.get("cache_creation_input_tokens", 0),
                     "cr":      u.get("cache_read_input_tokens", 0),
+                    "basis":   "provider",
                 })
     return sorted(entries, key=lambda x: x["ts"])
 
@@ -419,6 +559,9 @@ def print_summary(entries, show_env=False):
     print(f"  Period:        {entries[0]['date']} → {entries[-1]['date']}")
     print(f"  Turns:         {len(entries):,}")
     print(f"  Sessions:      {sessions:,}")
+    est = sum(1 for e in entries if e.get("basis") == "estimated")
+    if est:
+        print(f"  Note: {est:,} turn(s) lack provider usage — tokens estimated from content (~chars/4.0)")
     print(f"  Input tokens:  {fmt_tok(total_inp)}")
     print(f"  Output tokens: {fmt_tok(total_out)}")
     print(f"  Cache writes:  {fmt_tok(total_cw)}")
@@ -1032,6 +1175,471 @@ def annotate_task_types(
     return entries
 
 
+# ── coder session index ───────────────────────────────────────────────────────
+# Agent-agnostic per-session token ledger (ADR-006). Reads Claude Code JSONL and
+# OpenCode's SQLite database, normalizes both into xpal-coder-index/v1 rows, and
+# appends one row per session to an append-only JSONL ledger. Counting is purely
+# local — no model calls anywhere in the path.
+
+def _iso_to_epoch(ts: str | None) -> float | None:
+    if not ts:
+        return None
+    try:
+        d = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        return d.timestamp()
+    except ValueError:
+        return None
+
+
+def _epoch_ms_to_iso(ms) -> str | None:
+    if not ms:
+        return None
+    return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _duration_s(start: str | None, end: str | None) -> float | None:
+    s = _iso_to_epoch(start)
+    e = _iso_to_epoch(end)
+    if s is None or e is None or e < s:
+        return None
+    return round(e - s, 1)
+
+
+def _project_label(directory: str | None) -> str | None:
+    if not directory:
+        return None
+    return pathlib.Path(directory).name or None
+
+
+def _record_hash(record: dict) -> str:
+    payload = {k: v for k, v in record.items() if k != "hash"}
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _finalize_record(rec: dict) -> dict:
+    rec["schema"]          = INDEX_SCHEMA
+    rec["claudia_version"] = CLAUDIA_VERSION
+    rec["duration_s"]      = _duration_s(rec.get("started_at"), rec.get("ended_at"))
+    rec["hash"]            = _record_hash(rec)
+    return rec
+
+
+def read_claude_sessions() -> list[dict]:
+    """Normalize Claude Code JSONL into xpal-coder-index/v1 session records."""
+    sessions: dict[str, dict] = {}
+    pattern = str(claude_dir() / "projects/**/*.jsonl")
+    for f in glob.glob(pattern, recursive=True):
+        with open(f, errors="replace") as fh:
+            for line in fh:
+                try:
+                    e = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                sid = e.get("sessionId", "")
+                if not sid:
+                    continue
+                if sid not in sessions:
+                    sessions[sid] = {
+                        "cwd": e.get("cwd", "unknown"),
+                        "start_ts": e.get("timestamp", ""),
+                        "end_ts": e.get("timestamp", ""),
+                        "msgs": [],
+                        "user_chars": 0,
+                        "model": None,
+                    }
+                st = sessions[sid]
+                ts = e.get("timestamp", "")
+                if ts and (not st["start_ts"] or ts < st["start_ts"]):
+                    st["start_ts"] = ts
+                if ts and (not st["end_ts"] or ts > st["end_ts"]):
+                    st["end_ts"] = ts
+                if e.get("type") == "assistant":
+                    msg = e.get("message", {})
+                    model = msg.get("model")
+                    if model in (None, "<synthetic>"):
+                        continue
+                    st["cwd"] = e.get("cwd", st["cwd"])
+                    st["model"] = model
+                    interrupted = bool(e.get("isInterrupted")) or msg.get("stop_reason") == "interrupted"
+                    text, thinking, tool, _ = _content_chars(msg.get("content"))
+                    st["msgs"].append({
+                        "usage": msg.get("usage") or None,
+                        "chars_out": text + thinking + tool,
+                        "interrupted": interrupted,
+                    })
+                elif e.get("type") == "user":
+                    st["user_chars"] += _user_content_chars((e.get("message") or {}).get("content"))
+    return [r for r in ( _claude_session_record(sid, st) for sid, st in sessions.items() ) if r is not None]
+
+
+def _claude_session_record(sid: str, st: dict) -> dict | None:
+    msgs = st["msgs"]
+    if not msgs:
+        return None
+    n_usage      = sum(1 for m in msgs if m["usage"])
+    full_usage   = n_usage == len(msgs)
+    interrupted  = any(m["interrupted"] for m in msgs)
+    chars_in     = st["user_chars"]
+    chars_out    = sum(m["chars_out"] for m in msgs)
+    chars_junk   = sum(m["chars_out"] for m in msgs if m["interrupted"])
+    model        = st["model"] or "unknown"
+
+    if full_usage:
+        inp  = sum(m["usage"].get("input_tokens", 0) for m in msgs)
+        out  = sum(m["usage"].get("output_tokens", 0) for m in msgs)
+        cw   = sum(m["usage"].get("cache_creation_input_tokens", 0) for m in msgs)
+        cr   = sum(m["usage"].get("cache_read_input_tokens", 0) for m in msgs)
+        basis = "provider"
+        provider_usage = {"input": inp, "output": out, "cache_read": cr, "cache_write": cw}
+        junk = None if interrupted else 0   # provider can't separate the aborted span
+    else:
+        inp  = _chars_to_tokens(chars_in)
+        out  = _chars_to_tokens(chars_out)
+        basis = "estimated"
+        provider_usage = None
+        junk = _chars_to_tokens(chars_junk)
+
+    genuine = out if junk is None else out - junk
+    return _finalize_record({
+        "session_id": sid,
+        "source": "claude",
+        "agent": "claude",
+        "session_agent": None,
+        "model": model,
+        "provider": None,
+        "project": _project_label(st["cwd"]),
+        "started_at": st["start_ts"] or None,
+        "ended_at": st["end_ts"] or None,
+        "turns": len(msgs),
+        "input_tokens": inp,
+        "output_tokens": out,
+        "junk_tokens": junk,
+        "genuine_output_tokens": genuine,
+        "reasoning_tokens": None,
+        "cache_read_tokens": cr if full_usage else None,
+        "cache_write_tokens": cw if full_usage else None,
+        "chars_in": chars_in,
+        "chars_out": chars_out,
+        "chars_junk": chars_junk,
+        "basis": basis,
+        "provider_usage": provider_usage,
+        "cost_usd": None,
+    })
+
+
+def read_opencode_sessions() -> list[dict]:
+    """Normalize OpenCode sessions into xpal-coder-index/v1 records.
+
+    Prefers opencode's own reporting tools (`opencode db` to enumerate, then
+    `opencode export` per session) so opencode stats come from the reporting
+    interface itself and form the baseline. Falls back to reading the SQLite
+    database directly when the opencode CLI is unavailable.
+    """
+    if opencode_bin():
+        recs = _opencode_sessions_reporting()
+        if recs is not None:
+            return recs
+    return _opencode_sessions_sqlite()
+
+
+def _opencode_sessions_reporting() -> list[dict] | None:
+    """Gather opencode stats via `opencode db` + `opencode export`. Returns None
+    if the reporting tools fail (missing binary, bad output) so callers can fall
+    back to the direct SQLite read."""
+    binp = opencode_bin()
+    if not binp:
+        return None
+    try:
+        r = subprocess.run(
+            [binp, "db", "SELECT id FROM session WHERE time_archived IS NULL", "--format", "json"],
+            capture_output=True, text=True, timeout=120)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if r.returncode != 0:
+        return None
+    try:
+        ids = [row["id"] for row in json.loads(r.stdout) if row.get("id")]
+    except (json.JSONDecodeError, KeyError):
+        return None
+    records = []
+    for sid in ids:
+        exp = _opencode_export_one(binp, sid)
+        rec = _opencode_record_from_export(exp) if exp else None
+        if rec:
+            records.append(rec)
+    return records
+
+
+def _opencode_export_one(binp: str, sid: str) -> dict | None:
+    # `opencode export` truncates piped stdout at 64KB but writes the full JSON
+    # to a file, so stream to a temp file and read it back.
+    raw = ""
+    r = None
+    fname = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w+", suffix=".json", delete=False) as f:
+            fname = f.name
+            r = subprocess.run([binp, "export", sid], stdout=f,
+                               stderr=subprocess.DEVNULL, timeout=600)
+            f.seek(0)
+            raw = f.read()
+    except (OSError, subprocess.SubprocessError):
+        return None
+    finally:
+        if fname:
+            try:
+                os.unlink(fname)
+            except OSError:
+                pass
+    if r is None or r.returncode != 0:
+        return None
+    idx = raw.find("{")  # skip the "Exporting session: ..." preamble
+    if idx < 0:
+        return None
+    try:
+        return json.loads(raw[idx:])
+    except json.JSONDecodeError:
+        return None
+
+
+def _opencode_record_from_export(exp: dict) -> dict | None:
+    info = exp.get("info") or {}
+    sid  = info.get("id")
+    if not sid:
+        return None
+    toks   = info.get("tokens") or {}
+    inp    = toks.get("input") or 0
+    out    = toks.get("output") or 0
+    rea    = toks.get("reasoning") or 0
+    cache  = toks.get("cache") or {}
+    cr     = cache.get("read") or 0
+    cw     = cache.get("write") or 0
+    model_raw = info.get("model") or {}
+    model  = model_raw.get("id") if isinstance(model_raw, dict) else model_raw
+    prov   = model_raw.get("providerID") if isinstance(model_raw, dict) else None
+    t      = info.get("time") or {}
+
+    chars = {"text": 0, "thinking": 0, "tool": 0}
+    turns = 0
+    for m in exp.get("messages") or []:
+        if (m.get("info") or {}).get("role") == "assistant":
+            turns += 1
+        for p in m.get("parts") or []:
+            pt = p.get("type")
+            if pt == "text":
+                chars["text"] += len(p.get("text", "") or "")
+            elif pt == "reasoning":
+                chars["thinking"] += len(p.get("text", "") or "")
+            elif pt == "tool":
+                args = (p.get("state") or {}).get("input") or {}
+                chars["tool"] += len(p.get("tool", "") or "") + len(
+                    json.dumps(args, sort_keys=True, separators=(",", ":"), ensure_ascii=False))
+    chars_out = chars["text"] + chars["thinking"] + chars["tool"]
+
+    return _finalize_record({
+        "session_id": sid,
+        "source": "opencode",
+        "agent": "opencode",
+        "session_agent": info.get("agent") or None,
+        "model": model or "unknown",
+        "provider": prov,
+        "project": _project_label(info.get("directory")),
+        "started_at": _epoch_ms_to_iso(t.get("created")),
+        "ended_at": _epoch_ms_to_iso(t.get("updated")),
+        "turns": turns,
+        "input_tokens": inp,
+        "output_tokens": out,
+        "junk_tokens": None,           # OpenCode does not track aborted generations
+        "genuine_output_tokens": out,
+        "reasoning_tokens": rea or None,
+        "cache_read_tokens": cr,
+        "cache_write_tokens": cw,
+        "chars_in": None,
+        "chars_out": chars_out or None,
+        "chars_junk": None,
+        "basis": "provider",
+        "provider_usage": {"input": inp, "output": out, "cache_read": cr, "cache_write": cw},
+        "cost_usd": info.get("cost") if info.get("cost") is not None else None,
+    })
+
+
+def _opencode_sessions_sqlite() -> list[dict]:
+    """Direct read of opencode.db (fallback when the opencode CLI is missing)."""
+    db = opencode_db()
+    if not db.exists():
+        return []
+    try:
+        conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=5)
+    except sqlite3.Error:
+        return []
+    try:
+        rows = conn.execute(
+            "SELECT id, agent, model, tokens_input, tokens_output, tokens_reasoning, "
+            "tokens_cache_read, tokens_cache_write, cost, time_created, time_updated, "
+            "title, directory FROM session WHERE time_archived IS NULL"
+        ).fetchall()
+        part_rows = conn.execute("SELECT session_id, data FROM part WHERE data IS NOT NULL").fetchall()
+        msg_rows  = conn.execute("SELECT session_id, data FROM message WHERE data IS NOT NULL").fetchall()
+    except sqlite3.Error:
+        return []
+    finally:
+        conn.close()
+
+    chars: dict[str, dict] = {}
+    for sess, data in part_rows:
+        try:
+            d = json.loads(data)
+        except json.JSONDecodeError:
+            continue
+        t = d.get("type")
+        if t not in ("text", "reasoning", "tool"):
+            continue
+        c = chars.setdefault(sess, {"text": 0, "thinking": 0, "tool": 0})
+        if t == "text":
+            c["text"] += len(d.get("text", "") or "")
+        elif t == "reasoning":
+            c["thinking"] += len(d.get("text", "") or "")
+        elif t == "tool":
+            # Count only the model-generated tool call (name + arguments), not the
+            # tool result — results return to the model as *input*, not output.
+            args = (d.get("state") or {}).get("input") or {}
+            tool_chars = len(d.get("tool", "") or "") + len(
+                json.dumps(args, sort_keys=True, separators=(",", ":"), ensure_ascii=False))
+            c["tool"] += tool_chars
+
+    turns: dict[str, int] = {}
+    for sess, data in msg_rows:
+        try:
+            if json.loads(data).get("role") == "assistant":
+                turns[sess] = turns.get(sess, 0) + 1
+        except json.JSONDecodeError:
+            continue
+
+    return [_opencode_session_record(r[0], r, chars.get(r[0]), turns.get(r[0])) for r in rows]
+
+
+def _opencode_session_record(sid: str, r, char_counts: dict | None, turns: int | None) -> dict:
+    model_raw = r[2] or "unknown"
+    model     = model_raw
+    provider  = None
+    if isinstance(model_raw, str):
+        try:
+            mj = json.loads(model_raw)
+            model    = mj.get("id") or model_raw
+            provider = mj.get("providerID")
+        except json.JSONDecodeError:
+            pass
+    inp = r[3] or 0
+    out = r[4] or 0
+    cr  = r[6] or 0
+    cw  = r[7] or 0
+    return _finalize_record({
+        "session_id": sid,
+        "source": "opencode",
+        "agent": "opencode",
+        "session_agent": r[1] or None,
+        "model": model,
+        "provider": provider,
+        "project": _project_label(r[12]),
+        "started_at": _epoch_ms_to_iso(r[9]),
+        "ended_at": _epoch_ms_to_iso(r[10]),
+        "turns": turns,
+        "input_tokens": inp,
+        "output_tokens": out,
+        "junk_tokens": None,           # OpenCode does not track aborted generations
+        "genuine_output_tokens": out,
+        "reasoning_tokens": r[5] or None,
+        "cache_read_tokens": cr,
+        "cache_write_tokens": cw,
+        "chars_in": None,
+        "chars_out": (char_counts["text"] + char_counts["thinking"] + char_counts["tool"]) if char_counts else None,
+        "chars_junk": None,
+        "basis": "provider",
+        "provider_usage": {"input": inp, "output": out, "cache_read": cr, "cache_write": cw},
+        "cost_usd": r[8] if r[8] is not None else None,
+    })
+
+
+def _read_ledger_ids() -> set[str]:
+    p = index_file()
+    if not p.exists():
+        return set()
+    ids: set[str] = set()
+    with open(p, errors="replace") as fh:
+        for line in fh:
+            try:
+                ids.add(json.loads(line).get("session_id", ""))
+            except json.JSONDecodeError:
+                continue
+    return ids
+
+
+def cmd_index(since=None, project_filter=None, model_filter=None, agent_filter=None,
+              to_json=False, out_dir=None) -> None:
+    records = read_claude_sessions() + read_opencode_sessions()
+
+    if since:
+        records = [r for r in records
+                   if (r.get("started_at") or "") >= since or (r.get("ended_at") or "") >= since]
+    if project_filter:
+        records = [r for r in records if project_filter in (r.get("project") or "")]
+    if model_filter:
+        records = [r for r in records if model_filter in (r.get("model") or "")]
+    if agent_filter:
+        records = [r for r in records
+                   if r.get("agent") == agent_filter or r.get("session_agent") == agent_filter]
+    records.sort(key=lambda r: r.get("started_at") or "")
+
+    if out_dir:
+        dest_dir = pathlib.Path(out_dir).expanduser()
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        dest = dest_dir / INDEX_FILENAME
+        dest.write_text("".join(json.dumps(r) + "\n" for r in records))
+        print(f"  Exported {len(records)} session row(s)  →  {dest}")
+        _print_baseline(records)
+        return
+
+    if to_json:
+        print(json.dumps(records, indent=2))
+        return
+
+    seen = _read_ledger_ids()
+    new_records = [r for r in records if r["session_id"] not in seen]
+    if not new_records:
+        print(f"  No new sessions (ledger up to date at {index_file()}).")
+        _print_baseline(records)
+        return
+    index_file().parent.mkdir(parents=True, exist_ok=True)
+    with open(index_file(), "a") as fh:
+        for r in new_records:
+            fh.write(json.dumps(r) + "\n")
+    basis = "provider" if all(r["basis"] == "provider" for r in new_records) else "mixed"
+    print(f"  Appended {len(new_records)} session row(s)  →  {index_file()}  (basis: {basis})")
+    _print_baseline(records)
+
+
+def _print_baseline(records: list[dict]) -> None:
+    """Per-agent totals from this run; opencode (via its own reporting) is the
+    reference baseline that claude usage is tracked against (ADR-006)."""
+    agents: dict[str, dict] = {}
+    for r in records:
+        a = agents.setdefault(r["agent"], {"sessions": 0, "inp": 0, "out": 0, "genuine": 0})
+        a["sessions"] += 1
+        a["inp"]     += r["input_tokens"]
+        a["out"]     += r["output_tokens"]
+        a["genuine"] += r["genuine_output_tokens"] or r["output_tokens"]
+    if not agents:
+        return
+    print()
+    for a, t in sorted(agents.items()):
+        tag = " (baseline)" if a == "opencode" else ""
+        print(f"  {a}{tag}: {t['sessions']} session(s), "
+              f"{fmt_tok(t['inp'])} in / {fmt_tok(t['out'])} out "
+              f"(genuine {fmt_tok(t['genuine'])})")
+    print()
+
+
 # ── admin API key list ─────────────────────────────────────────────────────────
 
 def _api_list(admin_key: str, path: str, params: dict) -> list:
@@ -1085,19 +1693,24 @@ def cmd_keys() -> None:
 
 def cmd_install_cron() -> None:
     entry = f"0 8 * * * {claudia_bin()} --snapshot >> {monitor_log()} 2>&1"
+    index_entry = f"30 8 * * * {claudia_bin()} index >> {monitor_log()} 2>&1"
     try:
         current = subprocess.run(["crontab", "-l"], capture_output=True, text=True).stdout
     except FileNotFoundError:
         print("  crontab not found — install cron (e.g. apt install cron) and retry.", file=sys.stderr)
         sys.exit(1)
-    if "claudia --snapshot" in current:
-        print("  Daily snapshot job already installed.")
+    if "claudia --snapshot" in current and "claudia index" in current:
+        print("  Daily snapshot and coder-index jobs already installed.")
         return
-    new_tab = current.rstrip("\n") + ("\n" if current else "") + entry + "\n"
-    result  = subprocess.run(["crontab", "-"], input=new_tab, capture_output=True, text=True)
+    if "claudia --snapshot" not in current:
+        current += ("" if current.endswith("\n") else "\n") + entry + "\n"
+    if "claudia index" not in current:
+        current += index_entry + "\n"
+    result = subprocess.run(["crontab", "-"], input=current, capture_output=True, text=True)
     if result.returncode == 0:
         print(f"  Installed: {entry}")
-        print(f"  Snapshots saved to ~/.claude/claudia-snapshots/YYYY-MM-DD.json")
+        print(f"  Installed: {index_entry}")
+        print(f"  Snapshots → ~/.claude/claudia-snapshots/YYYY-MM-DD.json; ledger → ~/.claude/claudia-index/")
     else:
         print(f"  crontab error: {result.stderr.strip()}", file=sys.stderr)
         sys.exit(1)
@@ -1162,9 +1775,26 @@ def main():
                         help="Detailed cost breakdown by model and token type")
     parser.add_argument("--keys", action="store_true",
                         help="List API key IDs from the Admin API (requires ANTHROPIC_ADMIN_KEY)")
+    parser.add_argument("command", nargs="?", choices=["index"],
+                        help="index — build/append the agent-agnostic coder session ledger "
+                             "(ADR-006); combine with --json, --out, --since, --project, "
+                             "--model, --agent")
+    parser.add_argument("--json", action="store_true",
+                        help="With 'index': print ledger rows as JSON to stdout instead of appending")
+    parser.add_argument("--out", metavar="DIR",
+                        help="With 'index': write the full ledger to DIR/coder-index.jsonl")
+    parser.add_argument("--agent", metavar="NAME",
+                        help="With 'index': filter to agent 'claude' or 'opencode' "
+                             "(matches agent or session agent; CLAUDIA_AGENT env var is the default)")
     args = parser.parse_args()
 
     since_ts = (args.since + "T00:00:00Z") if args.since else None
+
+    if args.command == "index":
+        agent = args.agent or os.environ.get("CLAUDIA_AGENT", "")
+        cmd_index(since=args.since, project_filter=args.project, model_filter=args.model,
+                  agent_filter=agent, to_json=args.json, out_dir=args.out)
+        return
 
     if args.install_cron:
         cmd_install_cron()
@@ -1186,7 +1816,8 @@ def main():
         cmd_watch(since_ts, args.project, args.interval, model_filter=args.model)
         return
 
-    entries = load_entries(since=since_ts, project_filter=args.project, model_filter=args.model)
+    entries = load_entries(since=since_ts, project_filter=args.project, model_filter=args.model,
+                           fallback=not args.verify)
 
     if not entries:
         print("No matching usage data found.")

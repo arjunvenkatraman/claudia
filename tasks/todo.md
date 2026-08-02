@@ -35,6 +35,8 @@
 - [x] Pre-publication cleanup protocol — `scripts/scrub-public.sh` + `docs/public-release.md`; untracked `.DS_Store` / `.claude/settings.local.json`
 - [x] Agent-attributed commits — `prepare-commit-msg` hook appends a `Coding-Agent: claude|opencode|manual` trailer; installed via `scaffold.py init` / `--install-git-hook` and `claudia --install-git-hook` (issue #8, ADR-005)
 - [x] User documentation — `docs/` with installation, usage, container-env, agent-tagging, troubleshooting, and filing-issues (issue #10)
+- [x] Coder session index — `claudia index`: agent-agnostic per-session ledger (input/genuine-output/junk tokens + agent + model) from Claude Code JSONL + OpenCode SQLite; content-based summary fallback (issue #12, ADR-006)
+- [ ] OpenCode session integrity — confirm live/partial session rows in `opencode.db` and whether `session` token fields ever lag (watch item)
 - [ ] Multi-machine support — aggregate JSONL from remote machines via SSH or shared mount
 - [ ] Team usage rollup — aggregate by user across a shared workspace (requires Admin API)
 - [ ] Consider splitting `claudia.py` (now ~870 lines) into `_core.py` + `_admin.py` + entrypoint
