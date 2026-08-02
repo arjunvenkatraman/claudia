@@ -8,3 +8,8 @@ dist/
 *.egg-info/
 .env*
 *.env
+!.env.example
+
+# Machine-local / OS state — never commit
+.DS_Store
+.claude/

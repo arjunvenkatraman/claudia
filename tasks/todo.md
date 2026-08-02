@@ -31,6 +31,8 @@
 - [x] Cross-filter composition — `--model` filter added (substring match); combines freely with `--since`, `--project` across all report commands including `--cost`, `--delta`, `--by`, `--watch`, `--serve`
 - [x] `git init` and first commit (done)
 - [x] `--by task-type` — classify sessions by work category; `--classifier rules` (offline regex) and `--classifier haiku` (claude-haiku-4-5, cached); taxonomy configurable via `~/.claude/claudia-taxonomy.json`
+- [x] Guided portable setup — `containerconf/setup.sh` wizard generates a gitignored `.env`; run/build/cleanup scripts source it; env-var path overrides in `claudia.py` (issue #6, ADR-004)
+- [x] Pre-publication cleanup protocol — `scripts/scrub-public.sh` + `docs/public-release.md`; untracked `.DS_Store` / `.claude/settings.local.json`
 - [ ] Multi-machine support — aggregate JSONL from remote machines via SSH or shared mount
 - [ ] Team usage rollup — aggregate by user across a shared workspace (requires Admin API)
 - [ ] Consider splitting `claudia.py` (now ~870 lines) into `_core.py` + `_admin.py` + entrypoint
