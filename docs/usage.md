@@ -20,6 +20,36 @@ Shows a per-project summary: turns, sessions, tokens (input/output/cache), and
 estimated cost, ordered by usage. It scans every JSONL under `~/.claude/projects/`
 and is your starting point for anything else.
 
+When a session's messages carry no provider `usage` block, claudia now falls
+back to estimating tokens from message content (≈ chars ÷ 4.0) so the report is
+never empty — those turns are flagged with a note in the output. Use
+`--verify` for provider-accurate numbers (it reads only provider-flagged turns).
+
+## The coder session index — `index`
+
+```bash
+claudia index                     # append new per-session rows to the ledger
+claudia index --json              # print rows as JSON instead of appending
+claudia index --out /path/to/dir  # write the full ledger to /path/to/dir/coder-index.jsonl
+claudia index --agent opencode    # filter to one agent (claude | opencode)
+```
+
+Builds the agent-agnostic per-session ledger (ADR-006): one row per session with
+input / genuine-output / junk tokens, agent, model, timestamps, and exact char
+counts. Reads two sources and normalizes them into one schema
+(`xpal-coder-index/v1`):
+
+- **Claude Code** — `~/.claude/projects/**/*.jsonl` (content-based; provider
+  `usage` counts when present)
+- **OpenCode** — the read-only SQLite database at
+  `~/.local/share/opencode/opencode.db` (provider token counts)
+
+Rows are appended to `~/.claude/claudia-index/coder-index.jsonl`, deduplicated
+by `session_id`. Junk = aborted/interrupted generations only; OpenCode doesn't
+track aborts, so its rows carry `junk_tokens: null`. Counting is purely local —
+no model calls, no extra tokens, no prompt text, no file contents. The ledger is
+the input to bigtokentask's observed-cost index (see `docs/decisions/ADR-006`).
+
 ## Filters
 
 | Flag | What it does | Example |
@@ -92,7 +122,7 @@ ANTHROPIC_ADMIN_KEY=sk-ant-admin... claudia --keys    # list your API key IDs
 
 ```bash
 claudia --snapshot          # save ~/.claude/claudia-snapshots/YYYY-MM-DD.json
-claudia --install-cron      # install a daily 08:00 cron job that runs --snapshot
+claudia --install-cron      # install daily jobs: 08:00 snapshot, 08:30 index
 claudia --export json       # dump everything to stdout as JSON
 claudia --export csv        # CSV; combine with --by for grouped CSV
 ```
@@ -119,6 +149,9 @@ var, so it can run against relocated data without editing the file:
 | `CLAUDIA_SNAPSHOT_DIR` | `<claude>/claudia-snapshots` | Snapshot output |
 | `CLAUDIA_LABELS_FILE` | `<claude>/claudia-labels.json` | Task-type label cache |
 | `CLAUDIA_TAXONOMY_FILE` | `<claude>/claudia-taxonomy.json` | Task taxonomy override |
+| `CLAUDIA_INDEX_DIR` | `<claude>/claudia-index` | Where `index` appends `coder-index.jsonl` |
+| `CLAUDIA_OPENCODE_DB` | `~/.local/share/opencode/opencode.db` | OpenCode session DB for `index` |
+| `CLAUDIA_AGENT` | *unset* | Default agent filter for `index` (`claude`/`opencode`) |
 | `CLAUDIA_BIN` | auto-detected | Path to the `claudia` binary (for cron/serve) |
 | `CLAUDIA_MONITOR_LOG` | *unset* | Append an audit line per run (used by the container) |
 | `ANTHROPIC_ADMIN_KEY` | *unset* | Admin API key for `--verify` / `--keys` |

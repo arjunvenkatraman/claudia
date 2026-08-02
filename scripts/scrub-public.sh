@@ -30,12 +30,14 @@ for arg in "$@"; do
   esac
 done
 
-# Files that intentionally mention the scanned tokens (this script and its doc).
-SELF="scripts/scrub-public.sh"
-DOC="docs/public-release.md"
+# Files that intentionally reference the scanned tokens: this script, its doc,
+# and docs that legitimately cite the repo's own issue URL and documented
+# localhost port. Exempting them is the same tradeoff the script already makes
+# for its own files — keep the list narrow.
+EXEMPT="^(scripts/scrub-public\.sh|docs/public-release\.md|docs/filing-issues\.md|docs/usage\.md)$"
 
-# Tracked files, excluding the scanner's own files.
-mapfile -t FILES < <(git ls-files | grep -vE "^(scripts/scrub-public\.sh|docs/public-release\.md)$")
+# Tracked files, excluding the intentionally-exempt files.
+mapfile -t FILES < <(git ls-files | grep -vE "$EXEMPT")
 if [ "${#FILES[@]}" -eq 0 ]; then
   echo "No tracked files to scan."
   exit 0

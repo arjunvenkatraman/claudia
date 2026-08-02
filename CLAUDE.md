@@ -32,7 +32,8 @@ claudia/
 │       ├── ADR-002-environmental-estimates.md
 │       ├── ADR-003-admin-api-verify.md
 │       ├── ADR-004-guided-portable-setup.md
-│       └── ADR-005-agent-git-trailers.md
+│       ├── ADR-005-agent-git-trailers.md
+│       └── ADR-006-coder-session-index.md
 ├── tasks/
 │   ├── todo.md              # Current and upcoming work
 │   └── lessons.md           # Dated discoveries and gotchas
@@ -103,6 +104,8 @@ API integration approach. Key decisions:
 - ADR-001: Read local JSONL rather than making API calls for core reporting
 - ADR-002: Environmental impact estimation sources and methodology
 - ADR-003: Anthropic Admin API for cross-verification
+- ADR-006: Coder session index (`claudia index`) — agent-agnostic per-session
+  token ledger; read it before touching the ledger schema or counting logic
 
 ## Git workflow
 

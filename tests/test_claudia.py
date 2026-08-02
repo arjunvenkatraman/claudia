@@ -5,7 +5,9 @@ Run with: python3 -m unittest tests/test_claudia.py
 """
 import importlib.util
 import json
+import os
 import pathlib
+import sqlite3
 import sys
 import tempfile
 import unittest
@@ -87,7 +89,7 @@ class TestCalcEnv(unittest.TestCase):
 
     def test_water_proportional_to_energy(self):
         kwh, water, _ = calc_env(1000, 1000, 1000, 1000)
-        self.assertAlmostEqual(water / kwh, _mod.WATER_L_PER_KWH, places=5)
+        self.assertAlmostEqual(water / kwh, _mod.WUE_L_PER_KWH, places=5)
 
 
 class TestAggregate(unittest.TestCase):
@@ -304,6 +306,222 @@ class TestGitHook(unittest.TestCase):
             _mod.cmd_install_git_hook(str(repo))
             self.assertEqual(hook.stat().st_mtime_ns, first_mtime,
                              "re-install must not overwrite an existing hook")
+
+
+# ── coder session index (ADR-006) ─────────────────────────────────────────────
+
+def _write_claude_fixture(tmpdir, lines):
+    pdir = pathlib.Path(tmpdir) / ".claude" / "projects" / "demo"
+    pdir.mkdir(parents=True)
+    (pdir / "s.jsonl").write_text("".join(json.dumps(l) + "\n" for l in lines))
+
+
+def _with_home(tmpdir, fn):
+    orig_home = pathlib.Path.home
+    try:
+        pathlib.Path.home = staticmethod(lambda: pathlib.Path(tmpdir))
+        return fn()
+    finally:
+        pathlib.Path.home = staticmethod(orig_home)
+
+
+def _make_opencode_db(path):
+    conn = sqlite3.connect(str(path))
+    conn.execute("""CREATE TABLE session (
+        id TEXT, agent TEXT, model TEXT, tokens_input INTEGER, tokens_output INTEGER,
+        tokens_reasoning INTEGER, tokens_cache_read INTEGER, tokens_cache_write INTEGER,
+        cost REAL, time_created INTEGER, time_updated INTEGER, title TEXT, directory TEXT,
+        time_archived INTEGER)""")
+    conn.execute("CREATE TABLE part (session_id TEXT, data TEXT)")
+    conn.execute("CREATE TABLE message (session_id TEXT, data TEXT)")
+    conn.execute(
+        "INSERT INTO session VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,NULL)",
+        ("ses_aaa", "build", json.dumps({"id": "big-pickle", "providerID": "opencode"}),
+         1000, 500, 200, 3000, 4000, 1.25, 1785600000000, 1785603600000, "t", "/proj/z"))
+    conn.execute("INSERT INTO message VALUES ('ses_aaa', ?)", (json.dumps({"role": "assistant"}),))
+    conn.execute("INSERT INTO message VALUES ('ses_aaa', ?)", (json.dumps({"role": "user"}),))
+    conn.execute("INSERT INTO part VALUES ('ses_aaa', ?)",
+                 (json.dumps({"type": "text", "text": "hello world"}),))
+    conn.commit()
+    conn.close()
+
+
+class TestReadClaudeSessions(unittest.TestCase):
+    def test_provider_basis_when_usage_present(self):
+        with tempfile.TemporaryDirectory() as td:
+            _write_claude_fixture(td, [{
+                "type": "assistant", "sessionId": "s1", "timestamp": "2026-07-01T10:00:00Z",
+                "cwd": "/proj/a",
+                "message": {
+                    "model": "claude-sonnet-4-6",
+                    "usage": {"input_tokens": 100, "output_tokens": 50,
+                              "cache_creation_input_tokens": 10, "cache_read_input_tokens": 20},
+                    "content": [{"type": "text", "text": "hi"}],
+                },
+            }])
+            recs = _with_home(td, lambda: _mod.read_claude_sessions())
+            self.assertEqual(len(recs), 1)
+            r = recs[0]
+            self.assertEqual(r["basis"], "provider")
+            self.assertEqual(r["input_tokens"], 100)
+            self.assertEqual(r["output_tokens"], 50)
+            self.assertEqual(r["junk_tokens"], 0)
+            self.assertEqual(r["provider_usage"],
+                             {"input": 100, "output": 50, "cache_read": 20, "cache_write": 10})
+
+    def test_estimated_basis_and_junk_when_usage_absent(self):
+        with tempfile.TemporaryDirectory() as td:
+            _write_claude_fixture(td, [
+                {"type": "user", "sessionId": "s2", "timestamp": "2026-07-01T10:00:00Z",
+                 "cwd": "/proj/b", "message": {"content": "abcd"}},
+                {"type": "assistant", "sessionId": "s2", "timestamp": "2026-07-01T10:00:01Z",
+                 "cwd": "/proj/b", "message": {
+                     "model": "claude-sonnet-4-6",
+                     "content": [{"type": "text", "text": "x" * 80}]}},
+                {"type": "assistant", "sessionId": "s2", "timestamp": "2026-07-01T10:00:02Z",
+                 "cwd": "/proj/b", "message": {
+                     "model": "claude-sonnet-4-6", "isInterrupted": True,
+                     "stop_reason": "interrupted",
+                     "content": [{"type": "text", "text": "y" * 40}]}},
+            ])
+            recs = _with_home(td, lambda: _mod.read_claude_sessions())
+            self.assertEqual(len(recs), 1)
+            r = recs[0]
+            self.assertEqual(r["basis"], "estimated")
+            self.assertEqual(r["input_tokens"], 1)     # 4 user chars / 4.0
+            self.assertEqual(r["output_tokens"], 30)   # (80 + 40) / 4.0
+            self.assertEqual(r["junk_tokens"], 10)     # interrupted 40 chars
+            self.assertEqual(r["genuine_output_tokens"], 20)
+            self.assertEqual(r["agent"], "claude")
+            self.assertEqual(r["turns"], 2)
+            self.assertIsNone(r["provider_usage"])
+            self.assertEqual(r["schema"], "xpal-coder-index/v1")
+            self.assertTrue(r["hash"])
+
+    def test_synthetic_messages_excluded(self):
+        with tempfile.TemporaryDirectory() as td:
+            _write_claude_fixture(td, [{
+                "type": "assistant", "sessionId": "s3", "timestamp": "2026-07-01T10:00:00Z",
+                "cwd": "/proj/c",
+                "message": {"model": "<synthetic>",
+                            "content": [{"type": "text", "text": "ignored"}]},
+            }])
+            self.assertEqual(_with_home(td, lambda: _mod.read_claude_sessions()), [])
+
+
+class TestReadOpencodeSessions(unittest.TestCase):
+    def _read(self, td):
+        db = pathlib.Path(td) / "opencode.db"
+        _make_opencode_db(db)
+        old = os.environ.get("CLAUDIA_OPENCODE_DB")
+        os.environ["CLAUDIA_OPENCODE_DB"] = str(db)
+        try:
+            return _mod.read_opencode_sessions()
+        finally:
+            if old is None:
+                os.environ.pop("CLAUDIA_OPENCODE_DB", None)
+            else:
+                os.environ["CLAUDIA_OPENCODE_DB"] = old
+
+    def test_reads_provider_rows(self):
+        with tempfile.TemporaryDirectory() as td:
+            recs = self._read(td)
+            self.assertEqual(len(recs), 1)
+            r = recs[0]
+            self.assertEqual(r["agent"], "opencode")
+            self.assertEqual(r["session_agent"], "build")
+            self.assertEqual(r["model"], "big-pickle")
+            self.assertEqual(r["provider"], "opencode")
+            self.assertEqual(r["basis"], "provider")
+            self.assertEqual(r["input_tokens"], 1000)
+            self.assertEqual(r["output_tokens"], 500)
+            self.assertEqual(r["turns"], 1)
+            self.assertIsNone(r["junk_tokens"])
+            self.assertEqual(r["genuine_output_tokens"], 500)
+            self.assertEqual(r["chars_out"], 11)   # "hello world"
+            self.assertEqual(r["duration_s"], 3600.0)
+
+    def test_missing_db_returns_empty(self):
+        with tempfile.TemporaryDirectory() as td:
+            old = os.environ.get("CLAUDIA_OPENCODE_DB")
+            os.environ["CLAUDIA_OPENCODE_DB"] = str(pathlib.Path(td) / "nope.db")
+            try:
+                self.assertEqual(_mod.read_opencode_sessions(), [])
+            finally:
+                if old is None:
+                    os.environ.pop("CLAUDIA_OPENCODE_DB", None)
+                else:
+                    os.environ["CLAUDIA_OPENCODE_DB"] = old
+
+
+class TestCmdIndex(unittest.TestCase):
+    def test_append_dedup_export(self):
+        with tempfile.TemporaryDirectory() as td:
+            db  = pathlib.Path(td) / "opencode.db"
+            _make_opencode_db(db)
+            idx = pathlib.Path(td) / "ledger"
+            out = pathlib.Path(td) / "exp"
+            old_db  = os.environ.get("CLAUDIA_OPENCODE_DB")
+            old_idx = os.environ.get("CLAUDIA_INDEX_DIR")
+            os.environ["CLAUDIA_OPENCODE_DB"] = str(db)
+            os.environ["CLAUDIA_INDEX_DIR"]  = str(idx)
+            try:
+                _mod.cmd_index()
+                ledger = idx / "coder-index.jsonl"
+                self.assertEqual(len(ledger.read_text().splitlines()), 1)
+                _mod.cmd_index()  # dedup — no new rows
+                self.assertEqual(len(ledger.read_text().splitlines()), 1)
+                _mod.cmd_index(out_dir=str(out))
+                self.assertTrue((out / "coder-index.jsonl").exists())
+                import contextlib
+                with contextlib.redirect_stdout(open(os.devnull, "w")):
+                    _mod.cmd_index(to_json=True)  # smoke — no exception
+            finally:
+                if old_db is None:
+                    os.environ.pop("CLAUDIA_OPENCODE_DB", None)
+                else:
+                    os.environ["CLAUDIA_OPENCODE_DB"] = old_db
+                if old_idx is None:
+                    os.environ.pop("CLAUDIA_INDEX_DIR", None)
+                else:
+                    os.environ["CLAUDIA_INDEX_DIR"] = old_idx
+
+
+class TestLoadEntriesFallback(unittest.TestCase):
+    def test_estimated_entry_included_by_default(self):
+        with tempfile.TemporaryDirectory() as td:
+            _write_claude_fixture(td, [{
+                "type": "assistant", "sessionId": "s9", "timestamp": "2026-07-01T10:00:00Z",
+                "cwd": "/proj/nu",
+                "message": {"model": "claude-sonnet-4-6",
+                            "content": [{"type": "text", "text": "z" * 40}]},
+            }])
+            entries = _with_home(td, lambda: _mod.load_entries())
+            self.assertEqual(len(entries), 1)
+            self.assertEqual(entries[0]["basis"], "estimated")
+            self.assertEqual(entries[0]["out"], 10)
+
+    def test_provider_only_when_fallback_false(self):
+        with tempfile.TemporaryDirectory() as td:
+            _write_claude_fixture(td, [{
+                "type": "assistant", "sessionId": "s9", "timestamp": "2026-07-01T10:00:00Z",
+                "cwd": "/proj/nu",
+                "message": {"model": "claude-sonnet-4-6",
+                            "content": [{"type": "text", "text": "z" * 40}]},
+            }])
+            self.assertEqual(_with_home(td, lambda: _mod.load_entries(fallback=False)), [])
+
+    def test_provider_entry_flagged_provider(self):
+        with tempfile.TemporaryDirectory() as td:
+            _write_claude_fixture(td, [{
+                "type": "assistant", "sessionId": "s9", "timestamp": "2026-07-01T10:00:00Z",
+                "cwd": "/proj/nu",
+                "message": {"model": "claude-sonnet-4-6",
+                            "usage": {"input_tokens": 1, "output_tokens": 2},
+                            "content": [{"type": "text", "text": "hi"}]},
+            }])
+            entries = _with_home(td, lambda: _mod.load_entries())
+            self.assertEqual(entries[0]["basis"], "provider")
 
 
 if __name__ == "__main__":
