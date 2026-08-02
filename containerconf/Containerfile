@@ -7,7 +7,7 @@ RUN apt-get update \
         curl ca-certificates git ripgrep zsh \
     && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
-    && npm install -g @anthropic-ai/claude-code \
+    && npm install -g @anthropic-ai/claude-code opencode-ai \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
@@ -24,10 +24,10 @@ ARG HOST_UID=501
 RUN useradd -m -s /usr/bin/zsh -u "${HOST_UID}" coder
 
 # --- Mount points ---------------------------------------------------------
-# Host volumes mount here at runtime:
-#   Development/xpal-src  -> /xpal-src   (code)
-#   Development/xpal-data -> /xpal-data  (data)
-#   Development/xpal-auth -> /xpal-auth  (all credentials — see below)
+# Host folders (chosen by containerconf/setup.sh on each machine) mount here:
+#   <host code dir> -> /xpal-src   (code)
+#   <host data dir> -> /xpal-data  (data)
+#   <host auth dir> -> /xpal-auth  (all credentials — see below)
 RUN mkdir -p /xpal-src /xpal-data /xpal-auth \
     && chown coder:coder /xpal-src /xpal-data /xpal-auth
 

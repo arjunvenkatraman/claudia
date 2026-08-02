@@ -67,6 +67,43 @@ WATER_GLASS_L   = 0.250   # standard 8 oz / 250 mL drinking glass
 WATER_SHOWER_L  = 65.0    # 8-minute shower at 8 L/min (US EPA WaterSense)
 
 
+# ── machine-local paths (overridable for non-standard layouts) ──────────────
+# Everything defaults to ~/.claude so existing installs behave identically.
+# Each can be redirected via env var — e.g. when session logs or snapshots
+# live on a mount point rather than the default home location.
+
+def _path_from_env(name: str, default: pathlib.Path) -> pathlib.Path:
+    v = os.environ.get(name)
+    if v:
+        return pathlib.Path(v).expanduser()
+    return default
+
+
+def claude_dir() -> pathlib.Path:
+    """Root of Claude Code's local data (session logs live under projects/)."""
+    return _path_from_env("CLAUDIA_CLAUDE_DIR", pathlib.Path.home() / ".claude")
+
+
+def snapshots_dir() -> pathlib.Path:
+    return _path_from_env("CLAUDIA_SNAPSHOT_DIR", str(claude_dir() / "claudia-snapshots"))
+
+
+def labels_cache_file() -> pathlib.Path:
+    return _path_from_env("CLAUDIA_LABELS_FILE", str(claude_dir() / "claudia-labels.json"))
+
+
+def taxonomy_file() -> pathlib.Path:
+    return _path_from_env("CLAUDIA_TAXONOMY_FILE", str(claude_dir() / "claudia-taxonomy.json"))
+
+
+def claudia_bin() -> str:
+    return os.environ.get("CLAUDIA_BIN", "/usr/local/bin/claudia")
+
+
+def monitor_log() -> str:
+    return os.environ.get("CLAUDIA_MONITOR_LOG", str(claude_dir() / "claudia-monitor.log"))
+
+
 def calc_cost(model, inp, out, cw, cr):
     p = PRICING.get(model, DEFAULT_PRICING)
     return (inp * p[0] + out * p[1] + cw * p[2] + cr * p[3]) / 1_000_000
@@ -89,7 +126,7 @@ def calc_env(inp, out, cw, cr):
 
 def load_entries(since=None, project_filter=None, model_filter=None):
     entries = []
-    pattern = str(pathlib.Path.home() / ".claude/projects/**/*.jsonl")
+    pattern = str(claude_dir() / "projects/**/*.jsonl")
     for f in glob.glob(pattern, recursive=True):
         with open(f, errors="replace") as fh:
             for line in fh:
@@ -640,7 +677,7 @@ def cmd_serve(since, project_filter, port: int, model_filter: str | None = None)
 
 
 def cmd_snapshot(entries: list) -> None:
-    snap_dir = pathlib.Path.home() / ".claude" / "claudia-snapshots"
+    snap_dir = snapshots_dir()
     snap_dir.mkdir(parents=True, exist_ok=True)
     today    = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     out_file = snap_dir / f"{today}.json"
@@ -746,7 +783,7 @@ def cmd_cost(entries: list) -> None:
 
 # ── task-type classifier ──────────────────────────────────────────────────────
 
-LABELS_CACHE_FILE = pathlib.Path.home() / ".claude" / "claudia-labels.json"
+LABELS_CACHE_FILE = labels_cache_file()
 
 DEFAULT_TAXONOMY: dict[str, str] = {
     "research":       "Literature review, investigation, analysis of a topic",
@@ -773,7 +810,7 @@ DEFAULT_RULES: list[tuple[str | None, str | None, str]] = [
 
 def load_taxonomy() -> dict[str, str]:
     """Load user taxonomy from ~/.claude/claudia-taxonomy.json or return defaults."""
-    f = pathlib.Path.home() / ".claude" / "claudia-taxonomy.json"
+    f = taxonomy_file()
     if f.exists():
         try:
             data = json.loads(f.read_text())
@@ -805,7 +842,7 @@ def save_labels_cache(cache: dict[str, str]) -> None:
 def load_first_messages() -> dict[str, tuple[str, str]]:
     """Scan all JSONL files; return {sessionId: (cwd, first_user_text)}."""
     sessions: dict[str, tuple[str, str]] = {}
-    pattern = str(pathlib.Path.home() / ".claude/projects/**/*.jsonl")
+    pattern = str(claude_dir() / "projects/**/*.jsonl")
     for f in glob.glob(pattern, recursive=True):
         with open(f, errors="replace") as fh:
             for line in fh:
@@ -967,7 +1004,7 @@ def cmd_keys() -> None:
 
 
 def cmd_install_cron() -> None:
-    entry = "0 8 * * * /usr/local/bin/claudia --snapshot >> ~/.claude/claudia-monitor.log 2>&1"
+    entry = f"0 8 * * * {claudia_bin()} --snapshot >> {monitor_log()} 2>&1"
     try:
         current = subprocess.run(["crontab", "-l"], capture_output=True, text=True).stdout
     except FileNotFoundError:
