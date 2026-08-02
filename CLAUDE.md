@@ -18,10 +18,21 @@ claudia/
 ├── claudia.py               # The CLI — single Python script, stdlib only
 ├── pyproject.toml           # Package metadata for uv tool install
 ├── CLAUDE.md                # This file
-├── docs/decisions/          # ADRs — read before changing core approach
-│   ├── ADR-001-local-jsonl-parsing.md
-│   ├── ADR-002-environmental-estimates.md
-│   └── ADR-003-admin-api-verify.md
+├── README.md                # User-facing entry point, links to docs/
+├── docs/
+│   ├── README.md            # Docs index
+│   ├── installation.md      # Install CLI, container env, git hook
+│   ├── usage.md             # Full CLI reference
+│   ├── container-env.md     # Containerized dev environment
+│   ├── agent-tagging.md     # Coding-Agent commit trailers
+│   ├── troubleshooting.md   # Common problems and fixes
+│   ├── filing-issues.md     # How to file issues + contribute
+│   └── decisions/           # ADRs — read before changing core approach
+│       ├── ADR-001-local-jsonl-parsing.md
+│       ├── ADR-002-environmental-estimates.md
+│       ├── ADR-003-admin-api-verify.md
+│       ├── ADR-004-guided-portable-setup.md
+│       └── ADR-005-agent-git-trailers.md
 ├── tasks/
 │   ├── todo.md              # Current and upcoming work
 │   └── lessons.md           # Dated discoveries and gotchas
