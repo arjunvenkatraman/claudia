@@ -8,17 +8,23 @@ Creates the conventional layout used across /xpal-src projects:
   <dir>/tasks/lessons.md       (dated discoveries)
   <dir>/tests/                 (only with --code-project)
 
+Also installs the `prepare-commit-msg` git hook (skills/project-scaffold/
+prepare-commit-msg.sh) so every commit carries a `Coding-Agent:` trailer.
+
 Never overwrites existing files — it skips them and reports.
 
 Usage:
   scaffold.py <dir> --name NAME --summary "one-line summary" [--code-project]
   scaffold.py <dir> --add-adr "kebab-title" [--title "Human Readable Title"]
+  scaffold.py <dir> --install-git-hook
 """
 from __future__ import annotations
 
 import argparse
 import datetime as _dt
 import re
+import subprocess
+import sys
 from pathlib import Path
 
 CLAUDE_MD = """# {name} — development guidelines
@@ -43,6 +49,9 @@ CLAUDE_MD = """# {name} — development guidelines
 
 ## Git workflow
 - Conventional commits: `feat:`, `fix:`, `docs:`, `chore:`.
+- Every commit carries a `Coding-Agent:` trailer (`claude`, `opencode`, or
+  `manual`), appended by the `prepare-commit-msg` hook installed by the
+  scaffold. Reinstall with: `python3 <skill>/scaffold.py <dir> --install-git-hook`.
 - Do not commit secrets (API keys, tokens).
 """
 
@@ -105,6 +114,38 @@ def next_adr_number(decisions: Path) -> str:
     return f"{(max(nums) + 1) if nums else 1:03d}"
 
 
+def git_hooks_dir(root: Path) -> Path:
+    """Resolve the git hooks directory, honoring core.hooksPath when set."""
+    try:
+        r = subprocess.run(["git", "-C", str(root), "config", "--get", "core.hooksPath"],
+                           capture_output=True, text=True)
+        p = r.stdout.strip()
+        if p:
+            hp = Path(p)
+            return hp if hp.is_absolute() else root / hp
+    except OSError:
+        pass
+    return root / ".git" / "hooks"
+
+
+def install_git_hook(root: Path) -> int:
+    """Install the Coding-Agent prepare-commit-msg hook into the repo."""
+    hook_src = Path(__file__).parent / "prepare-commit-msg.sh"
+    if not hook_src.exists():
+        print(f"missing hook template next to this script: {hook_src}", file=sys.stderr)
+        return 1
+    hooks_dir = git_hooks_dir(root)
+    hooks_dir.mkdir(parents=True, exist_ok=True)
+    dest = hooks_dir / "prepare-commit-msg"
+    if dest.exists():
+        print(f"exists, skipped: {dest}")
+        return 0
+    dest.write_text(hook_src.read_text(encoding="utf-8"), encoding="utf-8")
+    dest.chmod(dest.stat().st_mode | 0o755)
+    print(f"created: {dest}")
+    return 0
+
+
 def add_adr(root: Path, kebab_title: str, title: str | None) -> int:
     decisions = root / "docs" / "decisions"
     decisions.mkdir(parents=True, exist_ok=True)
@@ -137,6 +178,7 @@ def init(root: Path, name: str, summary: str, code_project: bool) -> int:
         print(f"created: {p}")
     for p in skipped:
         print(f"exists, skipped: {p}")
+    install_git_hook(root)
     return 0
 
 
@@ -148,12 +190,16 @@ def main() -> int:
     ap.add_argument("--code-project", action="store_true", help="also create tests/")
     ap.add_argument("--add-adr", metavar="KEBAB_TITLE", help="add the next-numbered ADR instead of init")
     ap.add_argument("--title", help="human-readable ADR title (with --add-adr)")
+    ap.add_argument("--install-git-hook", action="store_true",
+                    help="install the Coding-Agent prepare-commit-msg hook (existing projects)")
     args = ap.parse_args()
 
     root = Path(args.dir).expanduser().resolve()
     root.mkdir(parents=True, exist_ok=True)
     if args.add_adr:
         return add_adr(root, args.add_adr, args.title)
+    if args.install_git_hook:
+        return install_git_hook(root)
     name = args.name or root.name
     return init(root, name, args.summary, args.code_project)
 

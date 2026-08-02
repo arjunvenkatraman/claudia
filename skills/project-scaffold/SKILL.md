@@ -1,6 +1,6 @@
 ---
 name: project-scaffold
-description: Scaffold the standard /xpal-src project structure — CLAUDE.md, docs/decisions ADRs, and tasks/ (todo.md + lessons.md). Use when initializing a new project under /xpal-src, when adding the standard structure to an existing project, or when adding a new ADR following the ADR-NNN-kebab-title convention.
+description: Scaffold the standard /xpal-src project structure — CLAUDE.md, docs/decisions ADRs, tasks/ (todo.md + lessons.md), and the Coding-Agent prepare-commit-msg git hook. Use when initializing a new project under /xpal-src, when adding the standard structure to an existing project, or when adding a new ADR following the ADR-NNN-kebab-title convention.
 ---
 
 # Project scaffold (/xpal-src convention)
@@ -17,10 +17,17 @@ Creates the conventional project layout used across the `/xpal-src` workspace (a
 └── tests/              # (code projects only)
 ```
 
+Also installs a `prepare-commit-msg` git hook into `.git/hooks/` (or
+`core.hooksPath` if set) that appends a `Coding-Agent:` trailer to every
+commit — `claude`, `opencode`, or `manual` — so git history records which
+agent (or human) produced each commit. See `prepare-commit-msg.sh` next to
+this file.
+
 ## When to use
 - Initialising a new project directory under `/xpal-src`.
 - Adding the standard `CLAUDE.md` + `docs/decisions/` + `tasks/` structure to an existing project that lacks it.
 - Adding the next-numbered ADR to an existing `docs/decisions/`.
+- **Adding the Coding-Agent git hook to an older project** that predates it.
 
 ## Fast path — the helper script
 A stdlib-only Python helper sits next to this file. It never overwrites existing files.
@@ -31,7 +38,14 @@ python3 scaffold.py /xpal-src/<project> --name <project> --summary "One-line des
 
 # Add the next ADR (auto-numbers ADR-NNN from existing files)
 python3 scaffold.py /xpal-src/<project> --add-adr "kebab-title" --title "Human Readable Title"
+
+# Install the Coding-Agent git hook into an EXISTING project (idempotent)
+python3 scaffold.py /xpal-src/<project> --install-git-hook
 ```
+
+`init` installs the git hook automatically. Existing projects that predate
+this convention can pull the latest best practice with `--install-git-hook`
+(also available as `claudia --install-git-hook [PATH]`).
 
 Resolve the script path relative to this skill (e.g. `~/.claude/skills/project-scaffold/scaffold.py`).
 
