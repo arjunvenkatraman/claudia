@@ -24,9 +24,12 @@ OpenCode persists sessions in a SQLite database
 (`~/.local/share/opencode/opencode.db`) whose `session` table already records
 per-session `tokens_input`, `tokens_output`, `tokens_reasoning`,
 `tokens_cache_read`, `tokens_cache_write`, `cost`, `model`, `agent`, and
-timestamps. Claude Code persists JSONL transcripts whose per-message `usage`
-is now often absent, but whose message content (text / thinking / tool_use
-blocks) is still present.
+timestamps. OpenCode also ships its own reporting interface: `opencode db`
+(SQL over the session store) and `opencode export <sessionID>` (per-session
+JSON with `info.tokens`, `info.time`, `info.cost`, `info.model`, and per-step
+`tokens` on step-finish parts). Claude Code persists JSONL transcripts whose
+per-message `usage` is now often absent, but whose message content (text /
+thinking / tool_use blocks) is still present.
 
 ## Decision
 
@@ -93,9 +96,19 @@ entrypoint or the developer can run it on demand.
 Two readers normalize into one record type:
 - `read_claude_sessions()` — Claude Code JSONL (content-based, plus `usage`
   when present).
-- `read_opencode_sessions()` — read-only SQLite query of `opencode.db`
-  (`CLAUDIA_OPENCODE_DB` override). Degrades gracefully on lock/schema
-  errors.
+- `read_opencode_sessions()` — OpenCode's **own reporting tools**: enumerate
+  sessions via `opencode db ... --format json`, then pull each session's
+  accounting via `opencode export <sessionID>`. Direct SQLite reads are kept
+  only as a fallback when no `opencode` CLI is available
+  (`CLAUDIA_OPENCODE_BIN` overrides discovery).
+
+### Baseline
+
+OpenCode's reporting is the reference: its rows are provider-basis and come from
+OpenCode's own accounting. `claudia index` prints a per-agent baseline after
+each run (sessions / input / output / genuine output), labeling the OpenCode
+totals as the baseline — claude usage is tracked against those numbers, and the
+cross-agent comparison lives in the same `xpal-coder-index/v1` ledger.
 
 ## Consequences
 
@@ -109,6 +122,9 @@ Two readers normalize into one record type:
   end-to-end throughput proxy, clearly labeled.
 - `junk_tokens` for OpenCode is unknown (`null`), so genuine-vs-junk ratio
   comparisons across agents must treat missing junk conservatively.
+- `opencode export` truncates *piped* stdout at 64 KB — claudia streams it to a
+  temp file and reads back the full JSON (a session with a long transcript can
+  be several MB), so indexing large histories is heavier than a raw SQL read.
 - The existing summary gains a content-based fallback so it no longer reports
   "No usage data" when provider detail is absent.
 - claudia stays stdlib-only and single-file (sqlite3 is stdlib).

@@ -14,9 +14,11 @@ import json
 import os
 import pathlib
 import re
+import shutil
 import sqlite3
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.parse
@@ -128,6 +130,17 @@ def index_file() -> pathlib.Path:
 def opencode_db() -> pathlib.Path:
     return _path_from_env("CLAUDIA_OPENCODE_DB",
                           pathlib.Path.home() / ".local/share/opencode/opencode.db")
+
+
+def opencode_bin() -> str | None:
+    """Path to the opencode CLI used for opencode reporting, or None.
+
+    claudia gathers opencode stats via opencode's own reporting tools
+    (`opencode db` + `opencode export`); this is the authoritative baseline that
+    claude usage is tracked against (ADR-006). Falls back to a direct read of
+    opencode.db when no opencode binary is available.
+    """
+    return os.environ.get("CLAUDIA_OPENCODE_BIN") or shutil.which("opencode")
 
 
 # prepare-commit-msg hook: appends a `Coding-Agent:` trailer naming the coding
@@ -1316,7 +1329,143 @@ def _claude_session_record(sid: str, st: dict) -> dict | None:
 
 
 def read_opencode_sessions() -> list[dict]:
-    """Normalize OpenCode's SQLite sessions into xpal-coder-index/v1 records."""
+    """Normalize OpenCode sessions into xpal-coder-index/v1 records.
+
+    Prefers opencode's own reporting tools (`opencode db` to enumerate, then
+    `opencode export` per session) so opencode stats come from the reporting
+    interface itself and form the baseline. Falls back to reading the SQLite
+    database directly when the opencode CLI is unavailable.
+    """
+    if opencode_bin():
+        recs = _opencode_sessions_reporting()
+        if recs is not None:
+            return recs
+    return _opencode_sessions_sqlite()
+
+
+def _opencode_sessions_reporting() -> list[dict] | None:
+    """Gather opencode stats via `opencode db` + `opencode export`. Returns None
+    if the reporting tools fail (missing binary, bad output) so callers can fall
+    back to the direct SQLite read."""
+    binp = opencode_bin()
+    if not binp:
+        return None
+    try:
+        r = subprocess.run(
+            [binp, "db", "SELECT id FROM session WHERE time_archived IS NULL", "--format", "json"],
+            capture_output=True, text=True, timeout=120)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if r.returncode != 0:
+        return None
+    try:
+        ids = [row["id"] for row in json.loads(r.stdout) if row.get("id")]
+    except (json.JSONDecodeError, KeyError):
+        return None
+    records = []
+    for sid in ids:
+        exp = _opencode_export_one(binp, sid)
+        rec = _opencode_record_from_export(exp) if exp else None
+        if rec:
+            records.append(rec)
+    return records
+
+
+def _opencode_export_one(binp: str, sid: str) -> dict | None:
+    # `opencode export` truncates piped stdout at 64KB but writes the full JSON
+    # to a file, so stream to a temp file and read it back.
+    raw = ""
+    r = None
+    fname = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w+", suffix=".json", delete=False) as f:
+            fname = f.name
+            r = subprocess.run([binp, "export", sid], stdout=f,
+                               stderr=subprocess.DEVNULL, timeout=600)
+            f.seek(0)
+            raw = f.read()
+    except (OSError, subprocess.SubprocessError):
+        return None
+    finally:
+        if fname:
+            try:
+                os.unlink(fname)
+            except OSError:
+                pass
+    if r is None or r.returncode != 0:
+        return None
+    idx = raw.find("{")  # skip the "Exporting session: ..." preamble
+    if idx < 0:
+        return None
+    try:
+        return json.loads(raw[idx:])
+    except json.JSONDecodeError:
+        return None
+
+
+def _opencode_record_from_export(exp: dict) -> dict | None:
+    info = exp.get("info") or {}
+    sid  = info.get("id")
+    if not sid:
+        return None
+    toks   = info.get("tokens") or {}
+    inp    = toks.get("input") or 0
+    out    = toks.get("output") or 0
+    rea    = toks.get("reasoning") or 0
+    cache  = toks.get("cache") or {}
+    cr     = cache.get("read") or 0
+    cw     = cache.get("write") or 0
+    model_raw = info.get("model") or {}
+    model  = model_raw.get("id") if isinstance(model_raw, dict) else model_raw
+    prov   = model_raw.get("providerID") if isinstance(model_raw, dict) else None
+    t      = info.get("time") or {}
+
+    chars = {"text": 0, "thinking": 0, "tool": 0}
+    turns = 0
+    for m in exp.get("messages") or []:
+        if (m.get("info") or {}).get("role") == "assistant":
+            turns += 1
+        for p in m.get("parts") or []:
+            pt = p.get("type")
+            if pt == "text":
+                chars["text"] += len(p.get("text", "") or "")
+            elif pt == "reasoning":
+                chars["thinking"] += len(p.get("text", "") or "")
+            elif pt == "tool":
+                args = (p.get("state") or {}).get("input") or {}
+                chars["tool"] += len(p.get("tool", "") or "") + len(
+                    json.dumps(args, sort_keys=True, separators=(",", ":"), ensure_ascii=False))
+    chars_out = chars["text"] + chars["thinking"] + chars["tool"]
+
+    return _finalize_record({
+        "session_id": sid,
+        "source": "opencode",
+        "agent": "opencode",
+        "session_agent": info.get("agent") or None,
+        "model": model or "unknown",
+        "provider": prov,
+        "project": _project_label(info.get("directory")),
+        "started_at": _epoch_ms_to_iso(t.get("created")),
+        "ended_at": _epoch_ms_to_iso(t.get("updated")),
+        "turns": turns,
+        "input_tokens": inp,
+        "output_tokens": out,
+        "junk_tokens": None,           # OpenCode does not track aborted generations
+        "genuine_output_tokens": out,
+        "reasoning_tokens": rea or None,
+        "cache_read_tokens": cr,
+        "cache_write_tokens": cw,
+        "chars_in": None,
+        "chars_out": chars_out or None,
+        "chars_junk": None,
+        "basis": "provider",
+        "provider_usage": {"input": inp, "output": out, "cache_read": cr, "cache_write": cw},
+        "cost_usd": info.get("cost") if info.get("cost") is not None else None,
+    })
+
+
+def _opencode_sessions_sqlite() -> list[dict]:
+    """Direct read of opencode.db (fallback when the opencode CLI is missing)."""
     db = opencode_db()
     if not db.exists():
         return []
@@ -1448,6 +1597,7 @@ def cmd_index(since=None, project_filter=None, model_filter=None, agent_filter=N
         dest = dest_dir / INDEX_FILENAME
         dest.write_text("".join(json.dumps(r) + "\n" for r in records))
         print(f"  Exported {len(records)} session row(s)  →  {dest}")
+        _print_baseline(records)
         return
 
     if to_json:
@@ -1458,6 +1608,7 @@ def cmd_index(since=None, project_filter=None, model_filter=None, agent_filter=N
     new_records = [r for r in records if r["session_id"] not in seen]
     if not new_records:
         print(f"  No new sessions (ledger up to date at {index_file()}).")
+        _print_baseline(records)
         return
     index_file().parent.mkdir(parents=True, exist_ok=True)
     with open(index_file(), "a") as fh:
@@ -1465,6 +1616,28 @@ def cmd_index(since=None, project_filter=None, model_filter=None, agent_filter=N
             fh.write(json.dumps(r) + "\n")
     basis = "provider" if all(r["basis"] == "provider" for r in new_records) else "mixed"
     print(f"  Appended {len(new_records)} session row(s)  →  {index_file()}  (basis: {basis})")
+    _print_baseline(records)
+
+
+def _print_baseline(records: list[dict]) -> None:
+    """Per-agent totals from this run; opencode (via its own reporting) is the
+    reference baseline that claude usage is tracked against (ADR-006)."""
+    agents: dict[str, dict] = {}
+    for r in records:
+        a = agents.setdefault(r["agent"], {"sessions": 0, "inp": 0, "out": 0, "genuine": 0})
+        a["sessions"] += 1
+        a["inp"]     += r["input_tokens"]
+        a["out"]     += r["output_tokens"]
+        a["genuine"] += r["genuine_output_tokens"] or r["output_tokens"]
+    if not agents:
+        return
+    print()
+    for a, t in sorted(agents.items()):
+        tag = " (baseline)" if a == "opencode" else ""
+        print(f"  {a}{tag}: {t['sessions']} session(s), "
+              f"{fmt_tok(t['inp'])} in / {fmt_tok(t['out'])} out "
+              f"(genuine {fmt_tok(t['genuine'])})")
+    print()
 
 
 # ── admin API key list ─────────────────────────────────────────────────────────

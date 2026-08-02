@@ -41,13 +41,20 @@ counts. Reads two sources and normalizes them into one schema
 
 - **Claude Code** — `~/.claude/projects/**/*.jsonl` (content-based; provider
   `usage` counts when present)
-- **OpenCode** — the read-only SQLite database at
-  `~/.local/share/opencode/opencode.db` (provider token counts)
+- **OpenCode** — via OpenCode's **own reporting tools**: `opencode db` to
+  enumerate sessions and `opencode export <id>` for each session's accounting
+  (`info.tokens`, `info.cost`, `info.model`). Falls back to reading
+  `~/.local/share/opencode/opencode.db` directly only when no `opencode` CLI
+  exists.
 
 Rows are appended to `~/.claude/claudia-index/coder-index.jsonl`, deduplicated
 by `session_id`. Junk = aborted/interrupted generations only; OpenCode doesn't
 track aborts, so its rows carry `junk_tokens: null`. Counting is purely local —
-no model calls, no extra tokens, no prompt text, no file contents. The ledger is
+no model calls, no extra tokens, no prompt text, no file contents.
+
+**Baseline:** OpenCode's numbers (provider-basis, from its own reporting) are
+the reference — each `index` run prints a per-agent baseline with the OpenCode
+totals labeled as such, so claude usage is tracked against them. The ledger is
 the input to bigtokentask's observed-cost index (see `docs/decisions/ADR-006`).
 
 ## Filters
@@ -150,7 +157,8 @@ var, so it can run against relocated data without editing the file:
 | `CLAUDIA_LABELS_FILE` | `<claude>/claudia-labels.json` | Task-type label cache |
 | `CLAUDIA_TAXONOMY_FILE` | `<claude>/claudia-taxonomy.json` | Task taxonomy override |
 | `CLAUDIA_INDEX_DIR` | `<claude>/claudia-index` | Where `index` appends `coder-index.jsonl` |
-| `CLAUDIA_OPENCODE_DB` | `~/.local/share/opencode/opencode.db` | OpenCode session DB for `index` |
+| `CLAUDIA_OPENCODE_DB` | `~/.local/share/opencode/opencode.db` | OpenCode DB (fallback when no `opencode` CLI) |
+| `CLAUDIA_OPENCODE_BIN` | auto-detected | Path to the `opencode` CLI used for reporting |
 | `CLAUDIA_AGENT` | *unset* | Default agent filter for `index` (`claude`/`opencode`) |
 | `CLAUDIA_BIN` | auto-detected | Path to the `claudia` binary (for cron/serve) |
 | `CLAUDIA_MONITOR_LOG` | *unset* | Append an audit line per run (used by the container) |

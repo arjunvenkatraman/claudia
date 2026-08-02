@@ -410,13 +410,16 @@ class TestReadClaudeSessions(unittest.TestCase):
 
 
 class TestReadOpencodeSessions(unittest.TestCase):
-    def _read(self, td):
+    """Direct-SQLite fallback path (`_opencode_sessions_sqlite`) — used when no
+    opencode CLI is available."""
+
+    def _read_sqlite(self, td):
         db = pathlib.Path(td) / "opencode.db"
         _make_opencode_db(db)
         old = os.environ.get("CLAUDIA_OPENCODE_DB")
         os.environ["CLAUDIA_OPENCODE_DB"] = str(db)
         try:
-            return _mod.read_opencode_sessions()
+            return _mod._opencode_sessions_sqlite()
         finally:
             if old is None:
                 os.environ.pop("CLAUDIA_OPENCODE_DB", None)
@@ -425,7 +428,7 @@ class TestReadOpencodeSessions(unittest.TestCase):
 
     def test_reads_provider_rows(self):
         with tempfile.TemporaryDirectory() as td:
-            recs = self._read(td)
+            recs = self._read_sqlite(td)
             self.assertEqual(len(recs), 1)
             r = recs[0]
             self.assertEqual(r["agent"], "opencode")
@@ -443,15 +446,109 @@ class TestReadOpencodeSessions(unittest.TestCase):
 
     def test_missing_db_returns_empty(self):
         with tempfile.TemporaryDirectory() as td:
-            old = os.environ.get("CLAUDIA_OPENCODE_DB")
+            old_db  = os.environ.get("CLAUDIA_OPENCODE_DB")
+            old_bin = os.environ.get("CLAUDIA_OPENCODE_BIN")
             os.environ["CLAUDIA_OPENCODE_DB"] = str(pathlib.Path(td) / "nope.db")
+            os.environ["CLAUDIA_OPENCODE_BIN"] = str(pathlib.Path(td) / "no-opencode-cli")
             try:
                 self.assertEqual(_mod.read_opencode_sessions(), [])
             finally:
-                if old is None:
+                if old_db is None:
                     os.environ.pop("CLAUDIA_OPENCODE_DB", None)
                 else:
-                    os.environ["CLAUDIA_OPENCODE_DB"] = old
+                    os.environ["CLAUDIA_OPENCODE_DB"] = old_db
+                if old_bin is None:
+                    os.environ.pop("CLAUDIA_OPENCODE_BIN", None)
+                else:
+                    os.environ["CLAUDIA_OPENCODE_BIN"] = old_bin
+
+
+def _write_opencode_stub(path, export):
+    """A fake `opencode` CLI: `db` lists one session, `export <id>` dumps it."""
+    stub = (
+        "#!/usr/bin/env python3\n"
+        "import json, sys\n"
+        "EXPORT = " + json.dumps(export) + "\n"
+        "if sys.argv[1] == 'db':\n"
+        "    print(json.dumps([{'id': EXPORT['info']['id']}]))\n"
+        "elif sys.argv[1] == 'export':\n"
+        "    print('Exporting session: ' + sys.argv[2])\n"
+        "    print(json.dumps(EXPORT))\n"
+    )
+    path.write_text(stub)
+    path.chmod(path.stat().st_mode | 0o111)
+
+
+class TestOpencodeReportingTools(unittest.TestCase):
+    """opencoide stats via its own reporting tools: `opencode db` + `opencode export`."""
+
+    EXPORT = {
+        "info": {
+            "id": "ses_stub", "agent": "plan", "title": "stub",
+            "directory": "/proj/z", "cost": 0.5,
+            "model": {"id": "big-pickle", "providerID": "opencode"},
+            "time": {"created": 1785600000000, "updated": 1785603600000},
+            "tokens": {"input": 1000, "output": 500, "reasoning": 200,
+                       "cache": {"read": 3000, "write": 4000}},
+        },
+        "messages": [
+            {"info": {"role": "assistant"},
+             "parts": [{"type": "text", "text": "hello world"},
+                       {"type": "reasoning", "text": "think"}]},
+            {"info": {"role": "user"}, "parts": []},
+        ],
+    }
+
+    def test_reporting_tools_source(self):
+        with tempfile.TemporaryDirectory() as td:
+            stub = pathlib.Path(td) / "opencode"
+            _write_opencode_stub(stub, self.EXPORT)
+            old = os.environ.get("CLAUDIA_OPENCODE_BIN")
+            os.environ["CLAUDIA_OPENCODE_BIN"] = str(stub)
+            try:
+                recs = _mod.read_opencode_sessions()
+            finally:
+                if old is None:
+                    os.environ.pop("CLAUDIA_OPENCODE_BIN", None)
+                else:
+                    os.environ["CLAUDIA_OPENCODE_BIN"] = old
+            self.assertEqual(len(recs), 1)
+            r = recs[0]
+            self.assertEqual(r["agent"], "opencode")
+            self.assertEqual(r["session_agent"], "plan")
+            self.assertEqual(r["model"], "big-pickle")
+            self.assertEqual(r["provider"], "opencode")
+            self.assertEqual(r["basis"], "provider")
+            self.assertEqual(r["input_tokens"], 1000)
+            self.assertEqual(r["output_tokens"], 500)
+            self.assertEqual(r["reasoning_tokens"], 200)
+            self.assertEqual(r["turns"], 1)
+            self.assertIsNone(r["junk_tokens"])
+            self.assertEqual(r["chars_out"], 16)   # "hello world" (11) + "think" (5)
+            self.assertEqual(r["cost_usd"], 0.5)
+            self.assertEqual(r["duration_s"], 3600.0)
+
+    def test_broken_cli_falls_back_to_sqlite(self):
+        with tempfile.TemporaryDirectory() as td:
+            db  = pathlib.Path(td) / "opencode.db"
+            _make_opencode_db(db)
+            old_db  = os.environ.get("CLAUDIA_OPENCODE_DB")
+            old_bin = os.environ.get("CLAUDIA_OPENCODE_BIN")
+            os.environ["CLAUDIA_OPENCODE_DB"] = str(db)
+            os.environ["CLAUDIA_OPENCODE_BIN"] = str(pathlib.Path(td) / "no-opencode-cli")
+            try:
+                recs = _mod.read_opencode_sessions()
+            finally:
+                if old_db is None:
+                    os.environ.pop("CLAUDIA_OPENCODE_DB", None)
+                else:
+                    os.environ["CLAUDIA_OPENCODE_DB"] = old_db
+                if old_bin is None:
+                    os.environ.pop("CLAUDIA_OPENCODE_BIN", None)
+                else:
+                    os.environ["CLAUDIA_OPENCODE_BIN"] = old_bin
+            self.assertEqual(len(recs), 1)
+            self.assertEqual(recs[0]["session_agent"], "build")  # from the fixture DB
 
 
 class TestCmdIndex(unittest.TestCase):
@@ -463,8 +560,10 @@ class TestCmdIndex(unittest.TestCase):
             out = pathlib.Path(td) / "exp"
             old_db  = os.environ.get("CLAUDIA_OPENCODE_DB")
             old_idx = os.environ.get("CLAUDIA_INDEX_DIR")
-            os.environ["CLAUDIA_OPENCODE_DB"] = str(db)
-            os.environ["CLAUDIA_INDEX_DIR"]  = str(idx)
+            old_bin = os.environ.get("CLAUDIA_OPENCODE_BIN")
+            os.environ["CLAUDIA_OPENCODE_DB"]  = str(db)
+            os.environ["CLAUDIA_INDEX_DIR"]   = str(idx)
+            os.environ["CLAUDIA_OPENCODE_BIN"] = str(pathlib.Path(td) / "no-opencode-cli")
             try:
                 _mod.cmd_index()
                 ledger = idx / "coder-index.jsonl"
@@ -485,6 +584,10 @@ class TestCmdIndex(unittest.TestCase):
                     os.environ.pop("CLAUDIA_INDEX_DIR", None)
                 else:
                     os.environ["CLAUDIA_INDEX_DIR"] = old_idx
+                if old_bin is None:
+                    os.environ.pop("CLAUDIA_OPENCODE_BIN", None)
+                else:
+                    os.environ["CLAUDIA_OPENCODE_BIN"] = old_bin
 
 
 class TestLoadEntriesFallback(unittest.TestCase):
