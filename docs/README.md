@@ -12,7 +12,7 @@ commit with the coding agent that produced it.
 | [installation.md](installation.md) | Installing the CLI, the container environment, and the git hook |
 | [usage.md](usage.md) | Every `claudia` command, filters, env-var overrides, examples |
 | [container-env.md](container-env.md) | The containerized Claude Code + OpenCode dev environment: setup, build, run tracks, auth, ports |
-| [agent-tagging.md](agent-tagging.md) | The `Coding-Agent:` commit trailer and its `prepare-commit-msg` hook |
+| [agent-tagging.md](agent-tagging.md) | The `Coding-Agent:` and `Model:` commit trailers and their `prepare-commit-msg` hook |
 | [troubleshooting.md](troubleshooting.md) | Common problems and fixes for the CLI, container, and hook |
 | [filing-issues.md](filing-issues.md) | How to report issues and the contributor workflow (ADR → Issue → Todo → branch → PR) |
 

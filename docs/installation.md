@@ -5,7 +5,8 @@ This covers three things you can install from this repository:
 1. The **`claudia` CLI** — usage/cost/environment reporting from Claude Code logs.
 2. The **containerized dev environment** — Claude Code + OpenCode in a Podman/
    Docker container with your code and credentials mounted in.
-3. The **`Coding-Agent` git hook** — tags every commit with which agent wrote it.
+3. The **`Coding-Agent` / `Model` git hook** — tags every commit with which
+   agent and model wrote it.
 
 ## Prerequisites
 
@@ -62,10 +63,12 @@ cd containerconf
 Requirements on the host: `podman` (or `docker`), a code folder, a data folder,
 and a credentials folder. `setup.sh` asks for all of these and creates them.
 
-## 3. Install the `Coding-Agent` git hook
+## 3. Install the `Coding-Agent` / `Model` git hook
 
-The hook appends a `Coding-Agent: claude|opencode|manual` trailer to every
-commit. Install it per repository in one of three ways:
+The hook appends `Coding-Agent: claude|opencode|manual` and `Model: <id>`
+trailers to every commit (`Model` needs `claudia` on `PATH` at commit time —
+see [ADR-007](decisions/ADR-007-agent-model-trailer.md)). Install it per
+repository in one of three ways:
 
 ```bash
 # A) From the claudia CLI (works even after the manual /usr/local/bin copy)

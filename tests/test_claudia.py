@@ -196,12 +196,7 @@ class TestLoadEntriesFromFixture(unittest.TestCase):
             proj_dir.mkdir(parents=True)
             (proj_dir / "session.jsonl").write_text(self.FIXTURE + "\n")
 
-            orig_home = pathlib.Path.home
-            try:
-                pathlib.Path.home = staticmethod(lambda: pathlib.Path(tmpdir))
-                entries = _mod.load_entries()
-            finally:
-                pathlib.Path.home = staticmethod(orig_home)
+            entries = _with_home(tmpdir, lambda: _mod.load_entries())
 
         self.assertEqual(len(entries), 1)
         e = entries[0]
@@ -233,12 +228,7 @@ class TestLoadEntriesModelFilter(unittest.TestCase):
         (proj_dir / "session.jsonl").write_text(line + "\n")
 
     def _load(self, tmpdir, **kwargs):
-        orig_home = pathlib.Path.home
-        try:
-            pathlib.Path.home = staticmethod(lambda: pathlib.Path(tmpdir))
-            return _mod.load_entries(**kwargs)
-        finally:
-            pathlib.Path.home = staticmethod(orig_home)
+        return _with_home(tmpdir, lambda: _mod.load_entries(**kwargs))
 
     def test_no_filter_returns_all(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -277,6 +267,8 @@ class TestGitHook(unittest.TestCase):
         self.assertIn("CLAUDE_CODE_ENTRYPOINT", hook)
         self.assertIn("OPENCODE", hook)
         self.assertIn("manual", hook)
+        self.assertIn("Model:", hook)
+        self.assertIn("--current-model", hook)
 
     def test_embedded_hook_matches_canonical_file(self):
         canonical = self.CANONICAL.read_text(encoding="utf-8")
@@ -317,12 +309,20 @@ def _write_claude_fixture(tmpdir, lines):
 
 
 def _with_home(tmpdir, fn):
+    """Isolate claude_dir() to tmpdir: patch Path.home() and clear the env vars
+    claude_dir() checks first (CLAUDIA_CLAUDE_DIR, CLAUDE_CONFIG_DIR) so a
+    dev container that sets CLAUDE_CONFIG_DIR (see docs/container-env.md)
+    doesn't leak real session data into these tests."""
     orig_home = pathlib.Path.home
+    saved = {k: os.environ.pop(k, None) for k in ("CLAUDIA_CLAUDE_DIR", "CLAUDE_CONFIG_DIR")}
     try:
         pathlib.Path.home = staticmethod(lambda: pathlib.Path(tmpdir))
         return fn()
     finally:
         pathlib.Path.home = staticmethod(orig_home)
+        for k, v in saved.items():
+            if v is not None:
+                os.environ[k] = v
 
 
 def _make_opencode_db(path):
@@ -344,6 +344,112 @@ def _make_opencode_db(path):
                  (json.dumps({"type": "text", "text": "hello world"}),))
     conn.commit()
     conn.close()
+
+
+class TestCurrentModel(unittest.TestCase):
+    """cmd_current_model / --current-model: data source for the hook's Model: trailer."""
+
+    def test_opencode_model_id_parses_json_blob(self):
+        blob = json.dumps({"id": "big-pickle", "providerID": "opencode"})
+        self.assertEqual(_mod._opencode_model_id(blob), "big-pickle")
+
+    def test_opencode_model_id_passes_through_plain_string(self):
+        self.assertEqual(_mod._opencode_model_id("claude-sonnet-4-6"), "claude-sonnet-4-6")
+
+    def test_opencode_model_id_handles_none(self):
+        self.assertEqual(_mod._opencode_model_id(None), "unknown")
+
+    def test_claude_model_from_session_jsonl(self):
+        with tempfile.TemporaryDirectory() as td:
+            sid = "sess-current-1"
+            pdir = pathlib.Path(td) / ".claude" / "projects" / "demo"
+            pdir.mkdir(parents=True)
+            (pdir / f"{sid}.jsonl").write_text(json.dumps({
+                "type": "assistant", "sessionId": sid,
+                "message": {"model": "claude-sonnet-5"},
+            }) + "\n")
+            old = os.environ.get("CLAUDE_CODE_SESSION_ID")
+            os.environ["CLAUDE_CODE_SESSION_ID"] = sid
+            try:
+                model = _with_home(td, lambda: _mod._current_claude_model())
+            finally:
+                if old is None:
+                    os.environ.pop("CLAUDE_CODE_SESSION_ID", None)
+                else:
+                    os.environ["CLAUDE_CODE_SESSION_ID"] = old
+        self.assertEqual(model, "claude-sonnet-5")
+
+    def test_claude_model_unknown_when_session_id_unset(self):
+        old = os.environ.pop("CLAUDE_CODE_SESSION_ID", None)
+        try:
+            with tempfile.TemporaryDirectory() as td:
+                model = _with_home(td, lambda: _mod._current_claude_model())
+        finally:
+            if old is not None:
+                os.environ["CLAUDE_CODE_SESSION_ID"] = old
+        self.assertEqual(model, "unknown")
+
+    def test_opencode_model_prefers_directory_match(self):
+        old_cwd = os.getcwd()
+        with tempfile.TemporaryDirectory() as td:
+            os.chdir(td)
+            here = os.getcwd()
+            db = pathlib.Path(td) / "opencode.db"
+            conn = sqlite3.connect(str(db))
+            conn.execute("""CREATE TABLE session (
+                id TEXT, agent TEXT, model TEXT, tokens_input INTEGER, tokens_output INTEGER,
+                tokens_reasoning INTEGER, tokens_cache_read INTEGER, tokens_cache_write INTEGER,
+                cost REAL, time_created INTEGER, time_updated INTEGER, title TEXT, directory TEXT,
+                time_archived INTEGER)""")
+            conn.execute(
+                "INSERT INTO session VALUES ('ses_old','build','old-model',1,1,1,1,1,0.0,1,2000,'t',?,NULL)",
+                ("/some/other/dir",))
+            conn.execute(
+                "INSERT INTO session VALUES ('ses_new','build','matching-model',1,1,1,1,1,0.0,1,1000,'t',?,NULL)",
+                (here,))
+            conn.commit()
+            conn.close()
+            old_db = os.environ.get("CLAUDIA_OPENCODE_DB")
+            os.environ["CLAUDIA_OPENCODE_DB"] = str(db)
+            try:
+                model = _mod._current_opencode_model()
+            finally:
+                os.chdir(old_cwd)
+                if old_db is None:
+                    os.environ.pop("CLAUDIA_OPENCODE_DB", None)
+                else:
+                    os.environ["CLAUDIA_OPENCODE_DB"] = old_db
+        self.assertEqual(model, "matching-model")
+
+    def test_opencode_model_falls_back_to_most_recent(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = pathlib.Path(td) / "opencode.db"
+            _make_opencode_db(db)
+            old_db = os.environ.get("CLAUDIA_OPENCODE_DB")
+            os.environ["CLAUDIA_OPENCODE_DB"] = str(db)
+            try:
+                model = _mod._current_opencode_model()
+            finally:
+                if old_db is None:
+                    os.environ.pop("CLAUDIA_OPENCODE_DB", None)
+                else:
+                    os.environ["CLAUDIA_OPENCODE_DB"] = old_db
+        self.assertEqual(model, "big-pickle")
+
+    def test_dispatch_prints_na_when_no_agent_markers(self):
+        saved = {k: os.environ.pop(k, None)
+                 for k in ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "OPENCODE")}
+        try:
+            import contextlib
+            import io
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                _mod.cmd_current_model()
+        finally:
+            for k, v in saved.items():
+                if v is not None:
+                    os.environ[k] = v
+        self.assertEqual(buf.getvalue().strip(), "n/a")
 
 
 class TestReadClaudeSessions(unittest.TestCase):
@@ -565,16 +671,16 @@ class TestCmdIndex(unittest.TestCase):
             os.environ["CLAUDIA_INDEX_DIR"]   = str(idx)
             os.environ["CLAUDIA_OPENCODE_BIN"] = str(pathlib.Path(td) / "no-opencode-cli")
             try:
-                _mod.cmd_index()
+                _with_home(td, lambda: _mod.cmd_index())
                 ledger = idx / "coder-index.jsonl"
                 self.assertEqual(len(ledger.read_text().splitlines()), 1)
-                _mod.cmd_index()  # dedup — no new rows
+                _with_home(td, lambda: _mod.cmd_index())  # dedup — no new rows
                 self.assertEqual(len(ledger.read_text().splitlines()), 1)
-                _mod.cmd_index(out_dir=str(out))
+                _with_home(td, lambda: _mod.cmd_index(out_dir=str(out)))
                 self.assertTrue((out / "coder-index.jsonl").exists())
                 import contextlib
                 with contextlib.redirect_stdout(open(os.devnull, "w")):
-                    _mod.cmd_index(to_json=True)  # smoke — no exception
+                    _with_home(td, lambda: _mod.cmd_index(to_json=True))  # smoke — no exception
             finally:
                 if old_db is None:
                     os.environ.pop("CLAUDIA_OPENCODE_DB", None)

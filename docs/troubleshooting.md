@@ -116,7 +116,7 @@ $XPAL_RUNTIME start -ai $XPAL_CONTAINER    # start+attach if it exists
 They were never in the image. Reinstall, or promote them into the Containerfile
 and `./build.sh` — see [container-env.md](container-env.md#tracking-hand-installed-dependencies).
 
-## Coding-Agent hook
+## Coding-Agent / Model hook
 
 ### Commits aren't getting a `Coding-Agent:` trailer
 
@@ -125,7 +125,7 @@ Check, in order:
 ```bash
 ls -l .git/hooks/prepare-commit-msg      # exists? executable?
 git config --get core.hooksPath          # if set, hook must be in THAT dir
-claudia --install-git-hook               # (re)install, idempotent
+claudia --install-git-hook               # installs only if missing — see below
 git commit --amend --no-edit             # verify on the next commit
 ```
 
@@ -139,10 +139,38 @@ Detection keys off the agent's own env markers (`OPENCODE=1`,
 proxy/CI that clears env), the hook falls back to `manual`. It errs toward
 accuracy — a missing tag beats a wrong one.
 
+### `Model: unknown` on an agent-tagged commit
+
+Check, in order:
+
+```bash
+command -v claudia                       # must be on PATH for the hook to shell out to it
+claudia --current-model                  # run it directly — what does it print?
+echo "$CLAUDE_CODE_SESSION_ID"           # claude: must be set
+ls "$(claudia --current-model 2>&1)"     # opencode: confirm ~/.local/share/opencode/opencode.db exists
+```
+
+`unknown` (as opposed to `n/a`) means the agent was detected but its model
+lookup came up empty — most often `claudia` isn't installed/on `PATH` in the
+shell that ran `git commit`, or the session log/db hasn't been written yet
+(very first message of a session). See
+[ADR-007](decisions/ADR-007-agent-model-trailer.md).
+
 ### Duplicate trailers after `--amend`
 
 Shouldn't happen — the hook dedupes. If you see two, your repo has a stale
-pre-`ADR-005` hook; reinstall with `claudia --install-git-hook`.
+pre-`ADR-005` hook.
+
+### Reinstalling the hook to pick up a newer version (e.g. to get `Model:`)
+
+`--install-git-hook` **skips if a hook file is already present** — it does
+not overwrite. To upgrade a repo tagged before ADR-007 (agent trailer only,
+no model), remove the old hook first:
+
+```bash
+rm .git/hooks/prepare-commit-msg
+claudia --install-git-hook
+```
 
 ## General
 
