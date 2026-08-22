@@ -26,7 +26,7 @@ Start with the [docs index](docs/README.md):
 | [installation.md](docs/installation.md) | Installing the CLI, container env, git hook |
 | [usage.md](docs/usage.md) | Every command, filters, env-var overrides |
 | [container-env.md](docs/container-env.md) | Containerized Claude Code + OpenCode environment |
-| [agent-tagging.md](docs/agent-tagging.md) | `Coding-Agent:` commit trailers |
+| [agent-tagging.md](docs/agent-tagging.md) | `Coding-Agent:` and `Model:` commit trailers |
 | [troubleshooting.md](docs/troubleshooting.md) | Common problems and fixes |
 | [filing-issues.md](docs/filing-issues.md) | Filing issues + contributor workflow |
 

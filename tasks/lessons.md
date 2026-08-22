@@ -30,3 +30,27 @@
   for energy per token. The best public source is TokenPowerBench (arxiv 2512.03024) at
   0.39 J/output token on H100 hardware. Water and carbon are derived from this via
   industry-average data-center WUE and US grid intensity.
+
+## 2026-08-22 — `Model:` trailer (ADR-007)
+
+- **No env var reliably names the running model.** `ANTHROPIC_MODEL`/`CLAUDE_MODEL` are
+  override *inputs*, not the effective model echoed back — unset in a normal session even
+  though a specific model is definitely running. Had to read it from the agent's own
+  session log instead of trusting the environment, unlike agent identity (ADR-005), which
+  genuinely is a stable env marker.
+- **Claude Code JSONL filenames are the session id** (`<sessionId>.jsonl`), so looking up
+  "the model for *this* session" via `CLAUDE_CODE_SESSION_ID` is a direct glob, not a scan
+  of `read_claude_sessions()`'s full history — much cheaper for something that runs on
+  every commit.
+- **OpenCode's `session.model` column is polymorphic**: sometimes a plain string, sometimes
+  a JSON blob `{"id", "providerID"}`. `_opencode_session_record` already handled this for
+  `claudia index`; the new `--current-model` path needed the same parsing (`_opencode_model_id`)
+  or it would've printed the raw JSON blob into commit trailers.
+- **`claude_dir()` was silently broken in this project's own container setup**: it checked
+  only `CLAUDIA_CLAUDE_DIR`, never `CLAUDE_CONFIG_DIR` (the var `docs/container-env.md`
+  documents this container as actually setting, to `/xpal-auth/claude`). Every claudia
+  command — not just the new one — was reading an empty default `~/.claude` and reporting
+  "No matching usage data found." the whole time. Found only because `--current-model`
+  returned `unknown` when the live JSONL clearly had the data. Worth periodically sanity
+  checking claudia's own commands actually see data in whatever environment they're
+  supposedly supported in, rather than trusting that passing tests means it works live.

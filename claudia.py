@@ -95,8 +95,15 @@ def _path_from_env(name: str, default: pathlib.Path) -> pathlib.Path:
 
 
 def claude_dir() -> pathlib.Path:
-    """Root of Claude Code's local data (session logs live under projects/)."""
-    return _path_from_env("CLAUDIA_CLAUDE_DIR", pathlib.Path.home() / ".claude")
+    """Root of Claude Code's local data (session logs live under projects/).
+
+    Checks CLAUDIA_CLAUDE_DIR (explicit override) first, then CLAUDE_CONFIG_DIR
+    (Claude Code's own env var for relocating its data dir — set to
+    /xpal-auth/claude in this project's container setup, see
+    docs/container-env.md), then falls back to ~/.claude.
+    """
+    default = os.environ.get("CLAUDE_CONFIG_DIR") or str(pathlib.Path.home() / ".claude")
+    return _path_from_env("CLAUDIA_CLAUDE_DIR", pathlib.Path(default))
 
 
 def snapshots_dir() -> pathlib.Path:
@@ -143,23 +150,34 @@ def opencode_bin() -> str | None:
     return os.environ.get("CLAUDIA_OPENCODE_BIN") or shutil.which("opencode")
 
 
-# prepare-commit-msg hook: appends a `Coding-Agent:` trailer naming the coding
-# agent that produced a commit (claude | opencode | manual), detected from the
-# env markers those agents set in shells they spawn.
+# prepare-commit-msg hook: appends `Coding-Agent:` and `Model:` trailers naming
+# the coding agent (claude | opencode | manual) and model that produced a
+# commit. Agent is detected from the env markers those agents set in shells
+# they spawn; model comes from `claudia --current-model` (see
+# cmd_current_model / ADR-007).
 # KEEP IN SYNC with skills/project-scaffold/prepare-commit-msg.sh.
 GIT_HOOK_PREPARE_COMMIT_MSG = """#!/usr/bin/env bash
-# prepare-commit-msg — append a `Coding-Agent:` trailer naming the coding agent
-# that produced this commit. Detection is via the env markers that Claude Code
-# and OpenCode set in every shell they spawn:
+# prepare-commit-msg — append `Coding-Agent:` and `Model:` trailers recording
+# the coding agent and model that produced this commit. Agent detection is via
+# the env markers that Claude Code and OpenCode set in every shell they spawn:
 #
 #   Claude Code — CLAUDECODE=1, CLAUDE_CODE_ENTRYPOINT=cli
 #   OpenCode    — OPENCODE=1, OPENCODE_PID=<pid>
 #
 # When no marker is present the commit is labeled `manual` (a human/terminal
-# commit) — an agent never silently claims a manual commit.
+# commit) — an agent never silently claims a manual commit, and `Model:` is
+# `n/a` since there is no agent to attribute a model to.
 #
-# Idempotent: if the message already carries a Coding-Agent trailer it is left
-# untouched, so `--amend`, merge, and squash commits are safe.
+# Model lookup shells out to `claudia --current-model`, which does a fast,
+# targeted read of the invoking session's own log (Claude Code JSONL keyed by
+# CLAUDE_CODE_SESSION_ID, or OpenCode's session database) — see
+# docs/decisions/ADR-007-agent-model-trailer.md. If `claudia` isn't on PATH or
+# the lookup fails, Model falls back to `unknown` rather than blocking the
+# commit.
+#
+# Idempotent: if the message already carries a Coding-Agent trailer both
+# trailers are left untouched, so `--amend`, merge, and squash commits are
+# safe.
 #
 # Install via the project-scaffold skill (`scaffold.py init` or
 # `scaffold.py <dir> --install-git-hook`) or `claudia --install-git-hook`.
@@ -183,15 +201,24 @@ elif [ "${OPENCODE:-}" = "1" ]; then
   AGENT="opencode"
 fi
 
-# Rebuild the message with the trailer appended after a blank line (git-trailer
+MODEL="n/a"
+if [ "$AGENT" != "manual" ]; then
+  MODEL=""
+  if command -v claudia >/dev/null 2>&1; then
+    MODEL="$(claudia --current-model 2>/dev/null)"
+  fi
+  [ -z "$MODEL" ] && MODEL="unknown"
+fi
+
+# Rebuild the message with the trailers appended after a blank line (git-trailer
 # style), stripping stray trailing blank lines/whitespace first.
 body="$(cat "$MSG_FILE")"
 body="$(printf '%s' "$body" | sed -e 's/[[:space:]]*$//')"
 
 if [ -n "$body" ]; then
-  printf '%s\\n\\nCoding-Agent: %s\\n' "$body" "$AGENT" > "$MSG_FILE"
+  printf '%s\\n\\nCoding-Agent: %s\\nModel: %s\\n' "$body" "$AGENT" "$MODEL" > "$MSG_FILE"
 else
-  printf 'Coding-Agent: %s\\n' "$AGENT" > "$MSG_FILE"
+  printf 'Coding-Agent: %s\\nModel: %s\\n' "$AGENT" "$MODEL" > "$MSG_FILE"
 fi
 
 exit 0
@@ -219,8 +246,93 @@ def cmd_install_git_hook(path: str | None) -> None:
     dest.write_text(GIT_HOOK_PREPARE_COMMIT_MSG, encoding="utf-8")
     dest.chmod(dest.stat().st_mode | 0o755)
     print(f"  Installed prepare-commit-msg hook: {dest}")
-    print("  Every commit will now carry a 'Coding-Agent:' trailer")
-    print("  (claude | opencode | manual).")
+    print("  Every commit will now carry 'Coding-Agent:' and 'Model:' trailers")
+    print("  (claude | opencode | manual; model id or 'unknown'/'n/a').")
+
+
+def cmd_current_model() -> None:
+    """Print the model for the invoking coding-agent session, or 'n/a'/'unknown'.
+
+    Used by the prepare-commit-msg hook to populate the `Model:` trailer.
+    Deliberately fast and subprocess-free (aside from opencode's own sqlite
+    file) so it's safe to shell out to on every commit — see ADR-007.
+    """
+    if os.environ.get("CLAUDECODE") == "1" or os.environ.get("CLAUDE_CODE_ENTRYPOINT"):
+        print(_current_claude_model())
+    elif os.environ.get("OPENCODE") == "1":
+        print(_current_opencode_model())
+    else:
+        print("n/a")
+
+
+def _current_claude_model() -> str:
+    """Model of the current Claude Code session, read directly from its own
+    JSONL transcript (filename == session id, so this is an O(1) lookup, not a
+    scan of the whole session history)."""
+    sid = os.environ.get("CLAUDE_CODE_SESSION_ID", "")
+    if not sid:
+        return "unknown"
+    pattern = str(claude_dir() / "projects" / "**" / f"{sid}.jsonl")
+    matches = glob.glob(pattern, recursive=True)
+    if not matches:
+        return "unknown"
+    model = "unknown"
+    with open(matches[0], errors="replace") as fh:
+        for line in fh:
+            try:
+                e = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if e.get("type") != "assistant":
+                continue
+            m = (e.get("message") or {}).get("model")
+            if m and m != "<synthetic>":
+                model = m
+    return model
+
+
+def _current_opencode_model() -> str:
+    """Model of the most recently active OpenCode session in this directory.
+
+    OpenCode sets no per-shell session-id env marker, so "most recently
+    updated session whose directory matches cwd" stands in for "current".
+    Reads opencode.db directly (no `opencode export` subprocess) to stay fast
+    enough for a git hook.
+    """
+    db = opencode_db()
+    if not db.exists():
+        return "unknown"
+    try:
+        conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=5)
+    except sqlite3.Error:
+        return "unknown"
+    try:
+        cwd = os.getcwd()
+        row = conn.execute(
+            "SELECT model FROM session WHERE time_archived IS NULL "
+            "AND directory = ? ORDER BY time_updated DESC LIMIT 1", (cwd,)
+        ).fetchone()
+        if row is None:
+            row = conn.execute(
+                "SELECT model FROM session WHERE time_archived IS NULL "
+                "ORDER BY time_updated DESC LIMIT 1"
+            ).fetchone()
+    except sqlite3.Error:
+        return "unknown"
+    finally:
+        conn.close()
+    return _opencode_model_id(row[0]) if row and row[0] else "unknown"
+
+
+def _opencode_model_id(model_raw) -> str:
+    """OpenCode's session.model column is either a plain string or a JSON blob
+    `{"id": ..., "providerID": ...}` — extract the bare model id either way."""
+    if isinstance(model_raw, str):
+        try:
+            return json.loads(model_raw).get("id") or model_raw
+        except json.JSONDecodeError:
+            return model_raw
+    return model_raw or "unknown"
 
 
 def calc_cost(model, inp, out, cw, cr):
@@ -1763,6 +1875,9 @@ def main():
                         const=os.getcwd(), default=None,
                         help="Install the Coding-Agent prepare-commit-msg hook into a "
                              "git repo (default: current directory)")
+    parser.add_argument("--current-model", action="store_true",
+                        help="Print the model for the invoking coding-agent session "
+                             "('n/a' if none). Used by the prepare-commit-msg hook.")
     parser.add_argument("--export", choices=["json", "csv"], metavar="{json,csv}",
                         help="Export data as JSON or CSV (combines with --by for CSV grouping)")
     parser.add_argument("--watch", action="store_true",
@@ -1802,6 +1917,10 @@ def main():
 
     if args.install_git_hook:
         cmd_install_git_hook(args.install_git_hook)
+        return
+
+    if args.current_model:
+        cmd_current_model()
         return
 
     if args.keys:

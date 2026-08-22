@@ -1,7 +1,7 @@
-# Coding-Agent commit tags
+# Coding-Agent / Model commit tags
 
-Every commit in a repo with this hook gets a standard git trailer naming the
-coding agent that produced it:
+Every commit in a repo with this hook gets standard git trailers naming the
+coding agent that produced it, and the model it was running:
 
 ```
 feat: add guided setup wizard (#6)
@@ -9,18 +9,20 @@ feat: add guided setup wizard (#6)
 containerconf/setup.sh now prompts per machine.
 
 Coding-Agent: opencode
+Model: claude-sonnet-4-6
 ```
 
 ## Why
 
-You often can't tell from a commit whether a human or an agent wrote it, or
-which agent. A `Coding-Agent:` trailer records it in the git history itself —
-visible in `git log`, GitHub, and any tooling that parses trailers — with no
-extra infrastructure.
+You often can't tell from a commit whether a human or an agent wrote it,
+which agent, or which model. `Coding-Agent:` and `Model:` trailers record
+both in the git history itself — visible in `git log`, GitHub, and any
+tooling that parses trailers — with no extra infrastructure.
 
 ## How detection works
 
-The `prepare-commit-msg` hook inspects the environment at commit time:
+The `prepare-commit-msg` hook inspects the environment at commit time for the
+agent:
 
 | Environment | Result |
 |---|---|
@@ -31,6 +33,20 @@ The `prepare-commit-msg` hook inspects the environment at commit time:
 A commit never goes untagged, and an agent never claims a human commit: the
 default is `manual`, so human commits are labeled by omission of agent markers,
 not by an agent's assumption.
+
+For `Model:`, the hook shells out to `claudia --current-model`, which reads
+the actual model from the invoking agent's own session log rather than an env
+var (neither agent reliably exports the running model into its env — see
+[ADR-007](decisions/ADR-007-agent-model-trailer.md)):
+
+| Agent | Model source | Fallback |
+|---|---|---|
+| `claude` | Claude Code's own JSONL transcript for `CLAUDE_CODE_SESSION_ID` | `unknown` if session file/model not found |
+| `opencode` | `opencode.db`'s most recently updated session in this directory | `unknown` if db missing/empty |
+| `manual` | — | `n/a` (no agent, no model) |
+
+If `claudia` isn't installed or the lookup errors, `Model:` is `unknown`
+rather than blocking the commit.
 
 ## Install
 
@@ -57,7 +73,7 @@ git commit --amend --no-edit --dry-run >/dev/null 2>&1
 git log -1 --format="%(trailers)"
 ```
 
-Expected for a terminal commit: `Coding-Agent: manual`.
+Expected for a terminal commit: `Coding-Agent: manual` and `Model: n/a`.
 
 ## Behavior details
 
@@ -73,8 +89,8 @@ Expected for a terminal commit: `Coding-Agent: manual`.
 ## Inspecting
 
 ```bash
-git log --format="%h %s%n    Coding-Agent: %(trailers:key=Coding-Agent)"
-git log -1 --pretty=%B                       # see the full message + trailer
+git log --format="%h %s%n    %(trailers:key=Coding-Agent)%n    %(trailers:key=Model)"
+git log -1 --pretty=%B                       # see the full message + trailers
 ```
 
 ## In this repo
@@ -82,4 +98,10 @@ git log -1 --pretty=%B                       # see the full message + trailer
 - Canonical hook source: `skills/project-scaffold/prepare-commit-msg.sh`.
 - `claudia --install-git-hook` embeds a byte-identical copy; a drift-guard test
   fails if the two ever diverge.
-- Design notes: [ADR-005](../docs/decisions/ADR-005-agent-git-trailers.md).
+- Design notes: [ADR-005](../docs/decisions/ADR-005-agent-git-trailers.md)
+  (agent trailer) and [ADR-007](decisions/ADR-007-agent-model-trailer.md)
+  (model trailer).
+- **Existing repos with the hook already installed**: `--install-git-hook`
+  skips if `.git/hooks/prepare-commit-msg` already exists, so upgrading to
+  get `Model:` on a repo tagged before ADR-007 means removing the old hook
+  file first, then reinstalling.

@@ -24,7 +24,7 @@
 - [x] `--cost` — local cost breakdown by model × token type (input/output/cw/cr)
 - [x] `--keys` — list Admin API key IDs (requires ANTHROPIC_ADMIN_KEY)
 - [x] `pyproject.toml` — installable via `uv tool install .`; source renamed to `claudia.py`
-- [x] `tests/test_claudia.py` — 23 fixture-based unit tests (pytest + unittest)
+- [x] `tests/test_claudia.py` — 50 fixture-based unit tests (pytest + unittest)
 
 ## Upcoming
 
@@ -36,6 +36,7 @@
 - [x] Agent-attributed commits — `prepare-commit-msg` hook appends a `Coding-Agent: claude|opencode|manual` trailer; installed via `scaffold.py init` / `--install-git-hook` and `claudia --install-git-hook` (issue #8, ADR-005)
 - [x] User documentation — `docs/` with installation, usage, container-env, agent-tagging, troubleshooting, and filing-issues (issue #10)
 - [x] Coder session index — `claudia index`: agent-agnostic per-session ledger (input/genuine-output/junk tokens + agent + model) from Claude Code JSONL + OpenCode SQLite; content-based summary fallback (issue #12, ADR-006)
+- [x] `Model:` git trailer — `prepare-commit-msg` hook now also records the model, via new `claudia --current-model` (fast, targeted Claude JSONL / opencode.db lookup, no `opencode export`); fixed `claude_dir()` to fall back to `CLAUDE_CONFIG_DIR` (was silently reading nothing in this project's own container setup) (ADR-007)
 - [ ] OpenCode session integrity — confirm live/partial session rows in `opencode.db` and whether `session` token fields ever lag (watch item)
 - [ ] Multi-machine support — aggregate JSONL from remote machines via SSH or shared mount
 - [ ] Team usage rollup — aggregate by user across a shared workspace (requires Admin API)

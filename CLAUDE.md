@@ -8,8 +8,10 @@ A CLI tool that reads Claude Code's local session logs (`~/.claude/projects/**/*
 to report token usage, estimated cost, and environmental impact. Intended to grow into a
 broader suite of Claude self-analysis and observability tools.
 
-The installed binary lives at `/usr/local/bin/claudia`. The source is the single file
-`/xpal-src/claudia/claudia.py` (`.py` extension required for Python packaging).
+The installed binary lives on `PATH` (`~/.local/bin/claudia` via `uv tool install
+--editable .`, or `/usr/local/bin/claudia` where that's writable). The source is the
+single file `/xpal-src/claudia/claudia.py` (`.py` extension required for Python
+packaging).
 
 ## Repository layout
 
@@ -33,7 +35,8 @@ claudia/
 │       ├── ADR-003-admin-api-verify.md
 │       ├── ADR-004-guided-portable-setup.md
 │       ├── ADR-005-agent-git-trailers.md
-│       └── ADR-006-coder-session-index.md
+│       ├── ADR-006-coder-session-index.md
+│       └── ADR-007-agent-model-trailer.md
 ├── tasks/
 │   ├── todo.md              # Current and upcoming work
 │   └── lessons.md           # Dated discoveries and gotchas
@@ -86,9 +89,10 @@ Environmental and pricing constants live at the top of `claudia`:
 | `WATER_L_PER_KWH` | Li et al. 2023 | Significant WUE improvements |
 | `CARBON_KG_PER_KWH` | EPA / Ember annual grid report | Annually |
 
-After updating constants, copy to `/usr/local/bin/claudia`:
+After updating constants, reinstall so the `claudia` on `PATH` picks up the change:
 ```bash
-cp /xpal-src/claudia/claudia.py /usr/local/bin/claudia
+uv tool install --editable /xpal-src/claudia   # symlinked entry point — usually no-op
+cp /xpal-src/claudia/claudia.py /usr/local/bin/claudia  # if installed there instead
 ```
 
 ## Verifying against the Anthropic Admin API
@@ -127,8 +131,9 @@ See `docs/filing-issues.md` → "ADR decision points and chat loops" for full gu
 ## Git workflow
 
 - Conventional commits: `feat:`, `fix:`, `docs:`, `chore:`
-- Every commit carries a `Coding-Agent:` trailer (`claude`, `opencode`, or
-  `manual`) via the `prepare-commit-msg` hook. Install it in a repo with
-  `claudia --install-git-hook [PATH]`.
+- Every commit carries `Coding-Agent:` (`claude`, `opencode`, or `manual`) and
+  `Model:` trailers via the `prepare-commit-msg` hook. Install it in a repo
+  with `claudia --install-git-hook [PATH]`. See ADR-007 and
+  `docs/agent-tagging.md`.
 - After any change to `claudia.py`, copy to `/usr/local/bin/claudia`
 - Do not commit API keys or Admin keys
