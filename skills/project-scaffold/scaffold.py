@@ -9,7 +9,8 @@ Creates the conventional layout used across /xpal-src projects:
   <dir>/tests/                 (only with --code-project)
 
 Also installs the `prepare-commit-msg` git hook (skills/project-scaffold/
-prepare-commit-msg.sh) so every commit carries a `Coding-Agent:` trailer.
+prepare-commit-msg.sh) so every commit carries `Coding-Agent:` and `Model:`
+trailers.
 
 Never overwrites existing files — it skips them and reports.
 
@@ -49,9 +50,10 @@ CLAUDE_MD = """# {name} — development guidelines
 
 ## Git workflow
 - Conventional commits: `feat:`, `fix:`, `docs:`, `chore:`.
-- Every commit carries a `Coding-Agent:` trailer (`claude`, `opencode`, or
-  `manual`), appended by the `prepare-commit-msg` hook installed by the
-  scaffold. Reinstall with: `python3 <skill>/scaffold.py <dir> --install-git-hook`.
+- Every commit carries `Coding-Agent:` (`claude`, `opencode`, or `manual`) and
+  `Model:` trailers, appended by the `prepare-commit-msg` hook installed by
+  the scaffold (`Model:` needs `claudia` on `PATH`; falls back to `unknown`
+  otherwise). Reinstall with: `python3 <skill>/scaffold.py <dir> --install-git-hook`.
 - Do not commit secrets (API keys, tokens).
 """
 
