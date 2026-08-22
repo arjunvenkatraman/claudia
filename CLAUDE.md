@@ -114,6 +114,16 @@ API integration approach. Key decisions:
 - ADR-006: Coder session index (`claudia index`) — agent-agnostic per-session
   token ledger; read it before touching the ledger schema or counting logic
 
+### Chat loop workflow for ADR decisions
+
+When working on design decisions, chat loops should:
+1. Reference existing ADRs before proposing new approaches
+2. Document evidence by filing issues (see `docs/filing-issues.md`)
+3. Cross-reference issues and ADRs for traceability
+4. Update `tasks/todo.md` with findings
+
+See `docs/filing-issues.md` → "ADR decision points and chat loops" for full guidance.
+
 ## Git workflow
 
 - Conventional commits: `feat:`, `fix:`, `docs:`, `chore:`

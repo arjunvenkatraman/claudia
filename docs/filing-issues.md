@@ -143,3 +143,67 @@ This repo follows a lightweight process — useful when you submit a PR:
   python3 -m unittest tests.test_claudia
   ```
 - Don't commit secrets; `.env` is gitignored on purpose.
+
+## ADR decision points and chat loops
+
+**Hard rule:** All public reference claims must include a URL. No exceptions. If you cite a
+report, article, dataset, or benchmark, the URL must be included. Unverifiable claims without
+sources weaken the decision record and cannot be fact-checked by other contributors.
+
+**Hard rule:** All file references (ADRs, docs, issues) must be hyperlinked with **absolute
+URLs**. When referencing an ADR like `ADR-0005`, link it to the full GitHub URL
+(e.g. `https://github.com/arjunvenkatraman/bigtokentask/blob/main/docs/decisions/ADR-0005-base-case-utilization.md`).
+When referencing an issue, use the full GitHub issue URL. Relative paths don't render as
+clickable links in GitHub issues — always use absolute URLs so readers can follow the chain
+of reasoning.
+
+When working on design decisions (ADRs), chat loops and coding agents should:
+
+### During discussion
+1. **Reference existing ADRs** — always check `docs/decisions/` before proposing new approaches
+2. **Document evidence** — when research uncovers new data relevant to an ADR, file an issue with the evidence (see template below)
+3. **Cross-reference issues** — link ADRs to GitHub issues and vice versa
+
+### When evidence emerges
+If during a chat loop you discover data that affects a Proposed ADR:
+
+1. **File an issue** documenting the evidence with citations
+2. **Comment on the ADR** referencing the new issue
+3. **Update tasks/todo.md** with the finding
+
+### Issue template for ADR evidence
+
+```markdown
+**ADR affected:** [ADR-XXX](https://github.com/<owner>/<repo>/blob/main/docs/decisions/ADR-XXX-kebab-title.md)
+**Status:** Proposed / Accepted
+**Evidence type:** [ ] Data [ ] Citation [ ] Benchmark [ ] Case study
+
+**Finding**
+<description of the evidence>
+
+**Source**
+<citation with absolute URL — REQUIRED for all public references>
+
+**Related issues**
+- [#[issue-number](https://github.com/<owner>/<repo>/issues/<number>) — <brief description>
+
+**Implications**
+<how this affects the ADR decision>
+
+**Action items**
+- [ ] Update ADR context section
+- [ ] Revise decision options
+- [ ] Run model/sensitivity analysis
+- [ ] Update claims-register.md (if applicable)
+```
+
+### Chat loop workflow for ADR decisions
+
+1. **Read** the ADR and related issues
+2. **Research** — use web search, read sources, gather evidence
+3. **Document** — file issues for new evidence, comment on ADRs
+4. **Propose** — suggest updates to the ADR based on evidence
+5. **Implement** — once decision is accepted, update model/data and tests
+6. **Verify** — run tests, update claims-register.md, close related issues
+
+This ensures multi-contributor reflection and that evidence-based decisions are traceable.
